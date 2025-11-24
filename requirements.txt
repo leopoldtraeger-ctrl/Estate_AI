@@ -1,9 +1,10 @@
 fastapi
 pydantic
-fastapi
 uvicorn
 playwright
-pytesseract
-pillow
+streamlit
+sqlalchemy
+requests
 beautifulsoup4
-SQLAlchemy
+python-dotenv
+openai
