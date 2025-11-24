@@ -1,10 +1,7 @@
-fastapi
-pydantic
-uvicorn
-playwright
 streamlit
 sqlalchemy
 requests
 beautifulsoup4
 python-dotenv
 openai
+EOF
