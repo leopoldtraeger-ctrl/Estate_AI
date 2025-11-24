@@ -21,11 +21,12 @@ BASE_DIR = Path(__file__).resolve().parents[1]  # eine Ebene über /Dashboard
 if str(BASE_DIR) not in sys.path:
     sys.path.append(str(BASE_DIR))
 
-# .env aus dem Projektroot laden
+# .env aus dem Projektroot laden (lokal)
 load_dotenv(BASE_DIR / ".env")
 
 from database.connection import get_session
 from database import models
+from database.models import Base  # für DB-Init
 from database.ingest import ingest_bulk_results
 from scraper.sources.rightmove_scraper import scrape_all_sync
 
@@ -47,9 +48,25 @@ except Exception as e:
 
 
 # =========================
-# Helper: DB-Access
+# DB-Init Helper
 # =========================
 
+def ensure_db_initialized() -> None:
+    """
+    Legt alle Tabellen an, falls sie noch nicht existieren.
+    Wichtig für Streamlit Cloud, wo die DB frisch ist.
+    """
+    try:
+        with get_session() as session:
+            bind = session.get_bind()
+            Base.metadata.create_all(bind=bind)
+    except Exception as e:
+        print("DB init failed (ignored):", e)
+
+
+# =========================
+# Helper: DB-Access
+# =========================
 
 def load_summary() -> Dict[str, Any]:
     with get_session() as session:
@@ -186,21 +203,15 @@ def extract_property_ids_from_question(question: str) -> List[int]:
 # Scraper + Ingest
 # =========================
 
-
-def refresh_data(location: str = "London", pages: int = 1, logger=None):
+def refresh_data(location: str = "London", pages: int = 1):
     """
     Läuft deinen Scraper + Ingest einmal durch,
     um neue Rightmove-Daten zu holen.
-
-    logger: Funktion, die Log-Zeilen entgegennimmt (z.B. Streamlit-Output).
     """
-    if logger is None:
-        # Fallback: Logs einfach in die Konsole schreiben
-        def logger(msg: str):
-            print(msg)
+    ensure_db_initialized()
 
-    # Scraper bekommt den logger, damit er Status ausgeben kann
-    results = scrape_all_sync(location=location, pages=pages, logger=logger)
+    # In der Cloud wird Playwright evtl. nicht laufen – Fehler dann im Log.
+    results = scrape_all_sync(location=location, pages=pages)
 
     total, success, error = ingest_bulk_results(
         results,
@@ -214,7 +225,6 @@ def refresh_data(location: str = "London", pages: int = 1, logger=None):
 # =========================
 # Bilder von Rightmove holen
 # =========================
-
 
 @st.cache_data(show_spinner=False)
 def get_listing_images(url: str) -> List[str]:
@@ -283,7 +293,6 @@ def get_listing_images(url: str) -> List[str]:
 # Chat-Kontext bauen
 # =========================
 
-
 def build_chat_context(max_listings: int = 30) -> str:
     """
     Baut einen kompakten Text-Kontext aus der Datenbank:
@@ -348,7 +357,7 @@ def ask_chat_model(question: str, context: str) -> str:
     if openai_client is None:
         return (
             "The AI assistant is not configured yet (missing OpenAI client or API key). "
-            "Please set OPENAI_API_KEY and install the 'openai' package in the environment."
+            "Please set OPENAI_API_KEY (e.g. in Streamlit Secrets) and install the 'openai' package."
         )
 
     completion = openai_client.chat.completions.create(
@@ -385,34 +394,23 @@ def ask_chat_model(question: str, context: str) -> str:
 # Streamlit Tabs
 # =========================
 
-
 def render_listings_tab():
     # --- Data Controls: Refresh-Button ---
     with st.expander("Data controls (Scraper)", expanded=True):
         col_r1, col_r2 = st.columns([1, 3])
 
         if col_r1.button("🔄 Fetch latest data from Rightmove"):
-            log_box = st.empty()
-            progress_lines: List[str] = []
-
-            def log_to_ui(message: str):
-                progress_lines.append(str(message))
-                text = "\n".join(progress_lines[-40:])  # nur letzte 40 Zeilen
-                log_box.markdown(f"```text\n{text}\n```")
-
-            log_to_ui("Step 1/3: Starting Rightmove scraper (Playwright)…")
+            status_box = st.empty()
+            status_box.info("Step 1/3: Starting Rightmove scraper (Playwright)…")
 
             with st.spinner("Scraping & ingesting latest Rightmove data…"):
-                total, success, error = refresh_data(
-                    location="London",
-                    pages=1,
-                    logger=log_to_ui,
-                )
-
-            log_to_ui("Step 2/3: Writing results into estateai.db…")
-            log_to_ui("Step 3/3: Done. Database updated with latest listings ✅")
-
-            st.success(f"Scrape run finished: total={total}, success={success}, error={error}")
+                try:
+                    total, success, error = refresh_data(location="London", pages=1)
+                    status_box.success("Step 3/3: Done. Database updated with latest listings ✅")
+                    st.success(f"Scrape run finished: total={total}, success={success}, error={error}")
+                except Exception as e:
+                    status_box.error(f"Error while scraping: {e}")
+                    st.error(f"Scraper error: {e}")
 
         st.caption(
             "Der Button triggert den Rightmove-Scraper (Playwright) und schreibt die Ergebnisse in die estateai.db."
@@ -480,12 +478,7 @@ def render_listings_tab():
 
     with col_left:
         ids = [l["id"] for l in listings]
-        selected_id = st.selectbox(
-            "Listing ID auswählen",
-            ids,
-            key="listing_id_select_main",  # eindeutiger Key
-        )
-
+        selected_id = st.selectbox("Listing ID auswählen", ids)
         selected = next(l for l in listings if l["id"] == selected_id)
 
         st.write(f"**URL:** [{selected['url']}]({selected['url']})")
@@ -498,26 +491,20 @@ def render_listings_tab():
         st.write(f"**Type:** {selected['type']}")
 
     with col_right:
-        # Bilder – einfacher Carousel-Viewer mit Pfeilen
+        # Bilder – einfacher "Carousel"-Viewer mit Pfeilen
         image_urls = get_listing_images(selected["url"])
 
         if image_urls:
-            state_key = f"img_idx_main_{selected['id']}"
+            state_key = f"img_idx_{selected['id']}"
 
             if state_key not in st.session_state:
                 st.session_state[state_key] = 0
 
             nav_left, nav_center, nav_right = st.columns([1, 4, 1])
             with nav_left:
-                prev_clicked = st.button(
-                    "◀",
-                    key=f"prev_main_{selected['id']}",  # eindeutiger Button-Key
-                )
+                prev_clicked = st.button("◀", key=f"prev_{selected['id']}_prev")
             with nav_right:
-                next_clicked = st.button(
-                    "▶",
-                    key=f"next_main_{selected['id']}",  # eindeutiger Button-Key
-                )
+                next_clicked = st.button("▶", key=f"next_{selected['id']}_next")
 
             if prev_clicked:
                 st.session_state[state_key] = (st.session_state[state_key] - 1) % len(image_urls)
@@ -620,8 +607,10 @@ def render_chat_tab():
 # Haupt-Entry
 # =========================
 
-
 def main():
+    # Tabellen anlegen, falls sie fehlen (wichtig in der Cloud)
+    ensure_db_initialized()
+
     st.set_page_config(
         page_title="EstateAI – Investor Dashboard",
         layout="wide",
