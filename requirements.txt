@@ -1,0 +1,9 @@
+fastapi
+pydantic
+fastapi
+uvicorn
+playwright
+pytesseract
+pillow
+beautifulsoup4
+SQLAlchemy
