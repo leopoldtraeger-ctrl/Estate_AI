@@ -2,6 +2,8 @@
 
 import asyncio
 import re
+import sys
+import subprocess
 from typing import List, Dict, Any, Optional, Callable
 
 from playwright.async_api import async_playwright
@@ -11,20 +13,75 @@ BASE = "https://www.rightmove.co.uk"
 Logger = Callable[[str], None]
 
 
+def _log(logger: Optional[Logger], msg: str):
+    """Kleiner Helper: wenn kein logger übergeben wird -> print."""
+    if logger is not None:
+        logger(msg)
+    else:
+        print(msg)
+
+
+# ----------------------------------------------------------
+# Playwright-Browser (Chromium) sicher installieren
+# ----------------------------------------------------------
+def ensure_browsers_installed(logger: Optional[Logger] = None):
+    """
+    Wird auf Streamlit Cloud gebraucht: dort ist zwar das Playwright-Python-
+    Paket installiert, aber NICHT automatisch der Chromium-Browser.
+
+    Läuft nur, falls der Launch zuvor mit "Executable doesn't exist" scheitert.
+    """
+    _log(
+        logger,
+        "Looks like the Playwright browser is missing. "
+        "Installing Chromium browser (this can take 30–60 seconds on first run)…",
+    )
+
+    cmd = [sys.executable, "-m", "playwright", "install", "chromium"]
+    try:
+        subprocess.run(cmd, check=True)
+        _log(logger, "Playwright Chromium installation finished ✅")
+    except Exception as e:
+        _log(logger, f"❌ Failed to install Playwright browsers automatically: {e}")
+        # Fehler weiterwerfen, damit du es im Log siehst
+        raise
+
+
 # ----------------------------------------------------------
 # Browser Setup
 # ----------------------------------------------------------
-async def launch_browser():
+async def launch_browser(logger: Optional[Logger] = None):
     pw = await async_playwright().start()
 
-    browser = await pw.chromium.launch(
-        headless=True,
-        args=[
-            "--disable-blink-features=AutomationControlled",
-            "--disable-web-security",
-            "--disable-dev-shm-usage",
-        ],
-    )
+    try:
+        browser = await pw.chromium.launch(
+            headless=True,
+            args=[
+                "--disable-blink-features=AutomationControlled",
+                "--disable-web-security",
+                "--disable-dev-shm-usage",
+            ],
+        )
+    except Exception as e:
+        # Typischer Streamlit-Cloud-Fehler: Executable doesn't exist …
+        if "Executable doesn't exist" in str(e):
+            await pw.stop()
+            # Browser-Binaries nachinstallieren
+            ensure_browsers_installed(logger)
+
+            # Noch einmal versuchen
+            pw = await async_playwright().start()
+            browser = await pw.chromium.launch(
+                headless=True,
+                args=[
+                    "--disable-blink-features=AutomationControlled",
+                    "--disable-web-security",
+                    "--disable-dev-shm-usage",
+                ],
+            )
+        else:
+            await pw.stop()
+            raise
 
     context = await browser.new_context(
         viewport={"width": 1600, "height": 1200},
@@ -196,7 +253,7 @@ async def fetch_links(
     if logger is None:
         logger = print  # Fallback
 
-    pw, browser, page = await launch_browser()
+    pw, browser, page = await launch_browser(logger=logger)
 
     logger(f"➡️ Fetching Rightmove listings for: {location}")
 
@@ -235,7 +292,7 @@ async def scrape_property(url: str, logger: Optional[Logger] = None) -> Dict[str
     if logger is None:
         logger = print
 
-    pw, browser, page = await launch_browser()
+    pw, browser, page = await launch_browser(logger=logger)
 
     logger(f"🏠 Scraping: {url}")
     await page.goto(url, timeout=70000)
