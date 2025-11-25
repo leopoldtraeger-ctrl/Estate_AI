@@ -30,6 +30,9 @@ from database.models import Base  # für DB-Init
 from database.ingest import ingest_bulk_results
 from scraper.sources.rightmove_scraper import scrape_all_sync
 
+# Analytics API
+API_URL = os.getenv("ESTATEAI_API_URL", "http://127.0.0.1:8000")
+
 # =========================
 # OpenAI-Client für Chat
 # =========================
@@ -102,6 +105,7 @@ def load_listings(
         stmt = (
             select(
                 models.Listing.id,
+                models.Listing.property_id,
                 models.Listing.url,
                 models.Listing.price,
                 models.Listing.bedrooms,
@@ -132,6 +136,7 @@ def load_listings(
         data.append(
             {
                 "id": r.id,
+                "property_id": r.property_id,
                 "url": r.url,
                 "price": r.price,
                 "bedrooms": r.bedrooms,
@@ -151,6 +156,7 @@ def load_listing_by_id(listing_id: int) -> Optional[Dict[str, Any]]:
     with get_session() as session:
         stmt = select(
             models.Listing.id,
+            models.Listing.property_id,
             models.Listing.url,
             models.Listing.price,
             models.Listing.bedrooms,
@@ -169,6 +175,7 @@ def load_listing_by_id(listing_id: int) -> Optional[Dict[str, Any]]:
 
     return {
         "id": row.id,
+        "property_id": row.property_id,
         "url": row.url,
         "price": row.price,
         "bedrooms": row.bedrooms,
@@ -497,77 +504,177 @@ def render_listings_tab():
         limit=200,
     )
 
-    st.subheader(f"📄 Listings (Treffer: {len(listings)})")
+    tab_overview, tab_capex, tab_refurb, tab_insights = st.tabs(
+        ["📄 Listings Overview", "🔧 Renovation & Capex", "🏗️ Refurb & Risk", "📈 Construction Insights"]
+    )
 
-    if not listings:
-        st.info("Keine Listings gefunden – eventuell Filter anpassen oder Scraper laufen lassen.")
-        return
+    with tab_overview:
+        st.subheader(f"📄 Listings (Treffer: {len(listings)})")
 
-    table_data = [
-        {
-            "ID": l["id"],
-            "Price (GBP)": l["price"],
-            "Bedrooms": l["bedrooms"],
-            "Bathrooms": l["bathrooms"],
-            "Type": l["type"],
-            "URL": l["url"],
-            "Description": l["description"],
-        }
-        for l in listings
-    ]
-    st.dataframe(table_data, use_container_width=True)
+        if not listings:
+            st.info("Keine Listings gefunden – eventuell Filter anpassen oder Scraper laufen lassen.")
+            return
 
-    # --- Detail-View ---
-    st.markdown("### 🔎 Listing Details")
+        table_data = [
+            {
+                "ID": l["id"],
+                "Property ID": l["property_id"],
+                "Price (GBP)": l["price"],
+                "Bedrooms": l["bedrooms"],
+                "Bathrooms": l["bathrooms"],
+                "Type": l["type"],
+                "URL": l["url"],
+                "Description": l["description"],
+            }
+            for l in listings
+        ]
+        st.dataframe(table_data, use_container_width=True)
 
-    col_left, col_right = st.columns([1, 2])
+        # --- Detail-View ---
+        st.markdown("### 🔎 Listing Details")
 
-    with col_left:
-        ids = [l["id"] for l in listings]
-        selected_id = st.selectbox("Listing ID auswählen", ids)
-        selected = next(l for l in listings if l["id"] == selected_id)
+        col_left, col_right = st.columns([1, 2])
 
-        st.write(f"**URL:** [{selected['url']}]({selected['url']})")
-        if selected["price"] is not None and not math.isnan(selected["price"]):
-            st.write(f"**Price:** £{selected['price']:,.0f}")
+        with col_left:
+            ids = [l["id"] for l in listings]
+            selected_id = st.selectbox("Listing ID auswählen", ids)
+            selected = next(l for l in listings if l["id"] == selected_id)
+
+            # in Session packen, damit Capex/Refurb Tabs Zugriff haben
+            st.session_state["selected_property"] = selected
+
+            st.write(f"**URL:** [{selected['url']}]({selected['url']})")
+            if selected["price"] is not None and not math.isnan(selected["price"]):
+                st.write(f"**Price:** £{selected['price']:,.0f}")
+            else:
+                st.write("**Price:** n/a")
+            st.write(f"**Bedrooms:** {selected['bedrooms']}")
+            st.write(f"**Bathrooms:** {selected['bathrooms']}")
+            st.write(f"**Type:** {selected['type']}")
+            st.write(f"**Property ID:** {selected['property_id']}")
+
+        with col_right:
+            # Bilder – einfacher "Carousel"-Viewer mit Pfeilen
+            image_urls = get_listing_images(selected["url"])
+
+            if image_urls:
+                state_key = f"img_idx_{selected['id']}"
+
+                if state_key not in st.session_state:
+                    st.session_state[state_key] = 0
+
+                nav_left, nav_center, nav_right = st.columns([1, 4, 1])
+                with nav_left:
+                    prev_clicked = st.button("◀", key=f"prev_{selected['id']}_prev")
+                with nav_right:
+                    next_clicked = st.button("▶", key=f"next_{selected['id']}_next")
+
+                if prev_clicked:
+                    st.session_state[state_key] = (st.session_state[state_key] - 1) % len(image_urls)
+                if next_clicked:
+                    st.session_state[state_key] = (st.session_state[state_key] + 1) % len(image_urls)
+
+                current_idx = st.session_state[state_key]
+                current_img = image_urls[current_idx]
+
+                st.image(current_img, use_container_width=True)
+                st.caption(f"Image {current_idx + 1} of {len(image_urls)} (Rightmove)")
+            else:
+                st.info("No image preview available for this listing.")
+
+            # Beschreibung
+            st.write("**Full Description:**")
+            st.write(selected["description_full"])
+
+    # ==== TAB 2: Renovation & Capex Copilot ====
+    with tab_capex:
+        st.subheader("🔧 Renovation & Capex Copilot")
+
+        if "selected_property" not in st.session_state:
+            st.info("Bitte zuerst im Tab 'Listings Overview' ein Listing auswählen.")
         else:
-            st.write("**Price:** n/a")
-        st.write(f"**Bedrooms:** {selected['bedrooms']}")
-        st.write(f"**Bathrooms:** {selected['bathrooms']}")
-        st.write(f"**Type:** {selected['type']}")
+            prop = st.session_state["selected_property"]
+            st.markdown(f"**Ausgewähltes Listing:** ID {prop['id']} – Property ID {prop['property_id']}")
+            st.write(f"Preis: £{prop['price']:,.0f}" if prop["price"] else "Preis: n/a")
 
-    with col_right:
-        # Bilder – einfacher "Carousel"-Viewer mit Pfeilen
-        image_urls = get_listing_images(selected["url"])
+            spec_level = st.selectbox("Ausbau-Standard", ["basic", "standard", "premium"], index=1)
 
-        if image_urls:
-            state_key = f"img_idx_{selected['id']}"
+            st.markdown("**Renovation Modules** (IDs müssen mit deiner DB übereinstimmen)")
+            kitchen = st.checkbox("Küche komplett (ID 1)")
+            bathroom = st.checkbox("Bad Kernsanierung (ID 2)")
+            windows = st.checkbox("Fenster & Dämmung (ID 3)")
 
-            if state_key not in st.session_state:
-                st.session_state[state_key] = 0
+            module_ids: List[int] = []
+            if kitchen:
+                module_ids.append(1)
+            if bathroom:
+                module_ids.append(2)
+            if windows:
+                module_ids.append(3)
 
-            nav_left, nav_center, nav_right = st.columns([1, 4, 1])
-            with nav_left:
-                prev_clicked = st.button("◀", key=f"prev_{selected['id']}_prev")
-            with nav_right:
-                next_clicked = st.button("▶", key=f"next_{selected['id']}_next")
+            current_rent_pcm = st.number_input("Aktuelle Miete (PCM)", min_value=0.0, value=0.0, step=50.0)
+            target_rent_pcm = st.number_input("Zielmiete nach Refurb (PCM)", min_value=0.0, value=0.0, step=50.0)
+            opex_per_year = st.number_input("OPEX / Jahr (£)", min_value=0.0, value=0.0, step=500.0)
 
-            if prev_clicked:
-                st.session_state[state_key] = (st.session_state[state_key] - 1) % len(image_urls)
-            if next_clicked:
-                st.session_state[state_key] = (st.session_state[state_key] + 1) % len(image_urls)
+            if st.button("Capex & Rendite berechnen"):
+                payload = {
+                    "property_id": int(prop["property_id"]),
+                    "region": "London",
+                    "building_type": "residential",
+                    "spec_level": spec_level,
+                    "renovation_module_ids": module_ids or None,
+                    "current_rent_pcm": current_rent_pcm or None,
+                    "target_rent_pcm": target_rent_pcm or None,
+                    "opex_per_year": opex_per_year or None,
+                    "purchase_price": prop.get("price"),
+                }
 
-            current_idx = st.session_state[state_key]
-            current_img = image_urls[current_idx]
+                try:
+                    resp = requests.post(f"{API_URL}/analytics/capex", json=payload, timeout=10)
+                    if resp.status_code != 200:
+                        st.error(f"Fehler: {resp.json().get('detail')}")
+                    else:
+                        data = resp.json()
+                        st.success("Ergebnis")
+                        st.write(f"**Total Capex:** £{data['total_capex']:,.0f}")
+                        st.write(f"**Capex / m²:** £{data['capex_per_sqm']:,.0f}")
+                        if data["new_rent_pcm"]:
+                            st.write(f"**Neue Miete (PCM):** £{data['new_rent_pcm']:,.0f}")
+                        if data["new_yield"] is not None:
+                            st.write(f"**Neue (simple) Netto-Rendite:** {data['new_yield']*100:.2f}%")
+                except Exception as e:
+                    st.error(f"API-Fehler: {e}")
 
-            st.image(current_img, use_container_width=True)
-            st.caption(f"Image {current_idx + 1} of {len(image_urls)} (Rightmove)")
+    # ==== TAB 3: Refurb-Rating & Risiko ====
+    with tab_refurb:
+        st.subheader("🏗️ Refurb Rating & Energy Risk")
+
+        if "selected_property" not in st.session_state:
+            st.info("Bitte zuerst im Tab 'Listings Overview' ein Listing auswählen.")
         else:
-            st.info("No image preview available for this listing.")
+            prop = st.session_state["selected_property"]
+            st.markdown(f"**Listing ID:** {prop['id']} – **Property ID:** {prop['property_id']}")
 
-        # Beschreibung
-        st.write("**Full Description:**")
-        st.write(selected["description_full"])
+            if st.button("Refurb & Risiko berechnen"):
+                try:
+                    resp = requests.get(f"{API_URL}/analytics/refurb/{int(prop['property_id'])}", timeout=10)
+                    if resp.status_code != 200:
+                        st.error(f"Fehler: {resp.json().get('detail')}")
+                    else:
+                        data = resp.json()
+                        st.write(f"**Refurb-Intensity:** {data['refurb_intensity']}")
+                        st.write(f"**Energy Risk Score:** {data['energy_risk_score']:.1f} / 100")
+                except Exception as e:
+                    st.error(f"API-Fehler: {e}")
+
+    # ==== TAB 4: Construction-Insights ====
+    with tab_insights:
+        st.subheader("📈 Construction & Cost Insights")
+        st.write(
+            "Hier kannst du später Baukosten-Indizes, Average Capex/m², "
+            "Verteilung nach Baujahr, Energieklassen usw. visualisieren."
+        )
+        st.info("Datenbasis dafür liegt in den Tabellen construction_cost_benchmarks & construction_indices.")
 
 
 def render_chat_tab():
@@ -616,7 +723,6 @@ def render_chat_tab():
 
         safe_content = html.escape(msg["content"])
 
-        # WICHTIG: keine führenden Leerzeichen, sonst macht Markdown einen Codeblock
         messages_html += f"""
 <div style="display:flex; justify-content:{align}; margin-bottom:0.35rem;">
   <div style="max-width:80%;">

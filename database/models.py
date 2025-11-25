@@ -93,6 +93,15 @@ class Property(Base):
     year_built = Column(Integer, nullable=True)
     is_new_build = Column(Boolean, default=False)
 
+    # 🏗️ Construction / Refurb
+    last_renovation_year = Column(Integer, nullable=True)
+    energy_rating = Column(String(10), nullable=True)           # z.B. "A", "B", "C"
+    refurb_intensity = Column(String(16), nullable=True)        # 'none', 'light', 'medium', 'full'
+    capex_estimate_per_sqm = Column(Float, nullable=True)
+    energy_risk_score = Column(Float, nullable=True)            # 0–100
+    opex_estimate_per_year = Column(Float, nullable=True)
+    current_rent_pcm = Column(Float, nullable=True)
+
     data_quality_score = Column(Float, default=0.0)
 
     first_seen_at = Column(DateTime, default=datetime.utcnow)
@@ -197,3 +206,62 @@ class ScrapeRun(Base):
 
     def __repr__(self):
         return f"<ScrapeRun id={self.id} portal={self.portal} status={self.status}>"
+
+
+# --------------------------------------
+# 7. Construction / Renovation Stammdaten
+# --------------------------------------
+class ConstructionCostBenchmark(Base):
+    __tablename__ = "construction_cost_benchmarks"
+
+    id = Column(Integer, primary_key=True)
+    country = Column(String(64), index=True)                  # z.B. "UK"
+    region = Column(String(128), index=True)                  # "London", "Manchester"
+    building_type = Column(String(64))                        # "residential", "office"
+    spec_level = Column(String(32))                           # "basic", "standard", "premium"
+
+    cost_per_sqm_min = Column(Float)
+    cost_per_sqm_max = Column(Float)
+
+    currency = Column(String(8), default="GBP")
+    source = Column(String(256), nullable=True)
+    as_of_date = Column(DateTime, nullable=True)
+
+    def __repr__(self):
+        return (
+            f"<ConstructionCostBenchmark id={self.id} "
+            f"{self.country}/{self.region} {self.building_type} {self.spec_level}>"
+        )
+
+
+class RenovationModule(Base):
+    __tablename__ = "renovation_modules"
+
+    id = Column(Integer, primary_key=True)
+    name = Column(String(128), unique=True)              # "Küche komplett", "Bad Kernsanierung"
+    description = Column(String(512), nullable=True)
+
+    typical_cost_min = Column(Float)
+    typical_cost_max = Column(Float)
+
+    impact_on_rent_pct = Column(Float, nullable=True)    # z.B. 5 = +5%
+    impact_on_energy_rating_classes = Column(Float, nullable=True)  # z.B. 1.0 = +1 Klasse
+
+    lifetime_years = Column(Integer, nullable=True)      # technische/ökonomische Lebensdauer
+
+    def __repr__(self):
+        return f"<RenovationModule id={self.id} name={self.name!r}>"
+
+
+class ConstructionIndex(Base):
+    __tablename__ = "construction_indices"
+
+    id = Column(Integer, primary_key=True)
+    index_name = Column(String(128))                     # "UK Residential Construction Cost Index"
+    region = Column(String(128), nullable=True)
+    value = Column(Float)                                # Indexstand (relativ)
+    base_year = Column(Integer, nullable=True)
+    date = Column(DateTime, index=True)
+
+    def __repr__(self):
+        return f"<ConstructionIndex id={self.id} name={self.index_name!r} date={self.date}>"

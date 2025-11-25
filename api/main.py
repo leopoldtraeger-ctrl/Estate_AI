@@ -5,8 +5,11 @@ from fastapi.middleware.cors import CORSMiddleware
 from scraper.sources.rightmove_listings import (
     fetch_links_sync,
     scrape_property_sync,
-    scrape_all_sync
+    scrape_all_sync,
 )
+
+# Analytics-Router
+from api.routes import analytics as analytics_routes
 
 app = FastAPI()
 
@@ -18,14 +21,17 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
 @app.get("/")
 def root():
     return {"status": "EstateAI API running"}
+
 
 # 1️⃣ Einzelne Immobilie
 @app.get("/scrape/property")
 def scrape_property(url: str):
     return scrape_property_sync(url)
+
 
 # 2️⃣ Nur Links
 @app.get("/scrape/listings")
@@ -33,10 +39,15 @@ def scrape_listings(location: str = "London", pages: int = 1):
     return {
         "location": location,
         "pages": pages,
-        "links": fetch_links_sync(location, pages)
+        "links": fetch_links_sync(location, pages),
     }
+
 
 # 3️⃣ Alle Listings + voll auslesen
 @app.get("/scrape/all")
 def scrape_all(location: str = "London", pages: int = 1):
     return scrape_all_sync(location, pages)
+
+
+# 4️⃣ Analytics
+app.include_router(analytics_routes.router)
