@@ -3,5 +3,5 @@ sqlalchemy
 requests
 beautifulsoup4
 python-dotenv
-openai
+openai>=1.0.0
 playwright
