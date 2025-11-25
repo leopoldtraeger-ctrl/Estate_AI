@@ -6,15 +6,15 @@ import sys
 import subprocess
 from typing import List, Dict, Any, Optional, Callable
 
-from playwright.async_api import async_playwright
+from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeoutError
 
 BASE = "https://www.rightmove.co.uk"
 
 Logger = Callable[[str], None]
 
 
-def _log(logger: Optional[Logger], msg: str):
-    """Kleiner Helper: wenn kein logger übergeben wird -> print."""
+def _log(logger: Optional[Logger], msg: str) -> None:
+    """Helper: wenn kein logger übergeben wird -> print()."""
     if logger is not None:
         logger(msg)
     else:
@@ -24,12 +24,11 @@ def _log(logger: Optional[Logger], msg: str):
 # ----------------------------------------------------------
 # Playwright-Browser (Chromium) sicher installieren
 # ----------------------------------------------------------
-def ensure_browsers_installed(logger: Optional[Logger] = None):
+def ensure_browsers_installed(logger: Optional[Logger] = None) -> None:
     """
-    Wird auf Streamlit Cloud gebraucht: dort ist zwar das Playwright-Python-
-    Paket installiert, aber NICHT automatisch der Chromium-Browser.
-
-    Läuft nur, falls der Launch zuvor mit "Executable doesn't exist" scheitert.
+    Für Umgebungen wie Streamlit Cloud / GitHub Actions:
+    - Python-Paket 'playwright' ist installiert
+    - aber der Chromium-Browser nicht
     """
     _log(
         logger,
@@ -43,7 +42,6 @@ def ensure_browsers_installed(logger: Optional[Logger] = None):
         _log(logger, "Playwright Chromium installation finished ✅")
     except Exception as e:
         _log(logger, f"❌ Failed to install Playwright browsers automatically: {e}")
-        # Fehler weiterwerfen, damit du es im Log siehst
         raise
 
 
@@ -63,13 +61,12 @@ async def launch_browser(logger: Optional[Logger] = None):
             ],
         )
     except Exception as e:
-        # Typischer Streamlit-Cloud-Fehler: Executable doesn't exist …
+        # Typischer Fehler in Cloud-Umgebungen:
+        # "Executable doesn't exist at /home/.../ms-playwright/chromium-..."
         if "Executable doesn't exist" in str(e):
             await pw.stop()
-            # Browser-Binaries nachinstallieren
             ensure_browsers_installed(logger)
 
-            # Noch einmal versuchen
             pw = await async_playwright().start()
             browser = await pw.chromium.launch(
                 headless=True,
@@ -120,7 +117,7 @@ async def launch_browser(logger: Optional[Logger] = None):
 # ----------------------------------------------------------
 # Accept Cookies
 # ----------------------------------------------------------
-async def accept_cookies(page):
+async def accept_cookies(page) -> None:
     try:
         await page.locator("#onetrust-accept-btn-handler").click(timeout=3000)
     except Exception:
@@ -135,7 +132,7 @@ async def accept_cookies(page):
 # ----------------------------------------------------------
 # Safe innerText evaluator
 # ----------------------------------------------------------
-async def safe_eval(page, selector: str):
+async def safe_eval(page, selector: str) -> Optional[str]:
     try:
         el = await page.query_selector(selector)
         if el:
@@ -219,7 +216,6 @@ def parse_from_body_text(body_text: str):
                 in_desc = True
             continue
 
-        # Stop-Kandidaten: Meta-Blöcke, Agent-Info etc.
         stop_markers = [
             "COUNCIL TAX",
             "Energy performance certificate",
@@ -257,7 +253,6 @@ async def fetch_links(
 
     logger(f"➡️ Fetching Rightmove listings for: {location}")
 
-    # TODO: echtes Mapping bauen; für Pitch reicht London:
     loc_id = "REGION^87490"  # London
 
     links: List[str] = []
@@ -266,7 +261,14 @@ async def fetch_links(
         url = f"{BASE}/property-for-sale/find.html?locationIdentifier={loc_id}&index={p * 24}"
 
         logger(f"📄 Loading listing page: {url}")
-        await page.goto(url, timeout=70000)
+        try:
+            # etwas „leichteres“ wait_until + Timeout abfangen
+            await page.goto(url, timeout=70000, wait_until="domcontentloaded")
+        except PlaywrightTimeoutError as e:
+            logger(f"❌ Timeout loading listing page {url}: {e}")
+            # nächste Seite probieren, aber NICHT den ganzen Run crashen
+            continue
+
         await accept_cookies(page)
         await page.wait_for_timeout(2000)
 
@@ -295,7 +297,26 @@ async def scrape_property(url: str, logger: Optional[Logger] = None) -> Dict[str
     pw, browser, page = await launch_browser(logger=logger)
 
     logger(f"🏠 Scraping: {url}")
-    await page.goto(url, timeout=70000)
+    try:
+        await page.goto(url, timeout=70000, wait_until="domcontentloaded")
+    except PlaywrightTimeoutError as e:
+        logger(f"❌ Timeout loading property page {url}: {e}")
+        await browser.close()
+        await pw.stop()
+        # Fehler-Record zurückgeben, damit der Run weiterläuft
+        return {
+            "url": url,
+            "title": None,
+            "price": None,
+            "address": None,
+            "description": None,
+            "bedrooms": None,
+            "bathrooms": None,
+            "property_type": None,
+            "source": "v4.7_textparse_timeout",
+            "error": f"timeout: {e}",
+        }
+
     await accept_cookies(page)
 
     # Warten, bis zumindest der Title da ist
