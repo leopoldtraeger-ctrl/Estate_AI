@@ -265,3 +265,28 @@ class ConstructionIndex(Base):
 
     def __repr__(self):
         return f"<ConstructionIndex id={self.id} name={self.index_name!r} date={self.date}>"
+
+
+class RentBenchmark(Base):
+    __tablename__ = "rent_benchmarks"
+
+    id = Column(Integer, primary_key=True)
+
+    country = Column(String(50), nullable=False, default="UK")
+    city = Column(String(100), nullable=True)
+
+    submarket_id = Column(Integer, ForeignKey("submarkets.id"), nullable=True)
+    submarket = relationship("Submarket", backref="rent_benchmarks")
+
+    bedrooms = Column(Integer, nullable=True)          # z.B. 1-Zimmer, 2-Zimmer etc.
+    property_type = Column(String(50), nullable=True)  # "Flat", "House" etc.
+
+    rent_psqm_min = Column(Float, nullable=True)       # £/m²/Monat min
+    rent_psqm_max = Column(Float, nullable=True)       # £/m²/Monat max
+
+    currency = Column(String(10), default="GBP")
+    source = Column(String(256), nullable=True)
+    as_of_date = Column(DateTime, nullable=True)
+
+    def __repr__(self):
+        return f"<RentBenchmark id={self.id} city={self.city!r} bedrooms={self.bedrooms}>"

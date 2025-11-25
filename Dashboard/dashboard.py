@@ -29,6 +29,8 @@ from database import models
 from database.models import Base  # für DB-Init
 from database.ingest import ingest_bulk_results
 from scraper.sources.rightmove_scraper import scrape_all_sync
+# 🆕 Benchmarks-Seed
+from database.seed_benchmarks import seed_all_benchmarks
 
 # Analytics API
 API_URL = os.getenv("ESTATEAI_API_URL", "http://127.0.0.1:8000")
@@ -58,11 +60,16 @@ def ensure_db_initialized() -> None:
     """
     Legt alle Tabellen an, falls sie noch nicht existieren.
     Wichtig für Streamlit Cloud, wo die DB frisch ist.
+    Zusätzlich: Seedet Benchmarks (Baukosten, Renovation Modules, Mietspiegel),
+    aber nur, wenn die Tabellen leer sind.
     """
     try:
         with get_session() as session:
             bind = session.get_bind()
             Base.metadata.create_all(bind=bind)
+
+            # 🆕 Benchmarks nur einmalig befüllen
+            seed_all_benchmarks(session)
     except Exception as e:
         print("DB init failed (ignored):", e)
 
