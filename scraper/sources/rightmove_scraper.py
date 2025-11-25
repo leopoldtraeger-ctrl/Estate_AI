@@ -285,7 +285,8 @@ def infer_refurb_intensity(text: str) -> str:
 def parse_from_body_text(body_text: str):
     """
     Verwendet den reinen Body-Text, um price, property_type,
-    bedrooms, bathrooms und description robust herauszuziehen.
+    bedrooms, bathrooms, description + floor_area_sqm, year_built,
+    energy_rating und refurb_intensity herauszuziehen.
     """
     lines = [l.strip() for l in body_text.splitlines() if l.strip()]
 
@@ -294,6 +295,11 @@ def parse_from_body_text(body_text: str):
     bedrooms = None
     bathrooms = None
     description = ""
+
+    floor_area_sqm = None
+    year_built = None
+    energy_rating = None
+    refurb_intensity = "none"
 
     # --- PRICE: erste Zeile, die mit £ beginnt ---
     for l in lines:
@@ -353,10 +359,10 @@ def parse_from_body_text(body_text: str):
 
         stop_markers = [
             "COUNCIL TAX",
-            "Energy performance certificate",
-            "Utilities, rights & restrictions",
+            "ENERGY PERFORMANCE CERTIFICATE",
+            "UTILITIES, RIGHTS & RESTRICTIONS",
             "CHECK HOW MUCH YOU CAN BORROW",
-            "ABOUT UNITED KINGDOM SOTHEBY'S INTERNATIONAL REALTY",
+            "ABOUT ",
         ]
         if any(sm in upper for sm in stop_markers):
             break
@@ -366,7 +372,128 @@ def parse_from_body_text(body_text: str):
     if desc_lines:
         description = "\n".join(desc_lines).strip()
 
-    return price, property_type, bedrooms, bathrooms, description
+    # ====================================================
+    # 🆕 Floor area (sq ft / sq m)
+    # ====================================================
+    def _parse_number(s: str) -> float | None:
+        s_clean = re.sub(r"[^\d\.]", "", s)
+        if not s_clean:
+            return None
+        try:
+            return float(s_clean)
+        except Exception:
+            return None
+
+    # zuerst nach m² suchen
+    m2_match = re.search(
+        r"([\d,\.]+)\s*(?:sq\.?\s*m|sqm|square metres?|square meters?)",
+        body_text,
+        flags=re.I,
+    )
+    if m2_match:
+        val = _parse_number(m2_match.group(1))
+        if val:
+            floor_area_sqm = val
+    else:
+        # dann sq ft → in m² umrechnen
+        ft_match = re.search(
+            r"([\d,\.]+)\s*(?:sq\.?\s*ft|sqft|square feet)",
+            body_text,
+            flags=re.I,
+        )
+        if ft_match:
+            val = _parse_number(ft_match.group(1))
+            if val:
+                floor_area_sqm = val * 0.092903
+
+    # ====================================================
+    # 🆕 Year built
+    # ====================================================
+    year_match = re.search(
+        r"(?:built|constructed|erected|completed)\s+(?:in\s+)?(19\d{2}|20\d{2})",
+        body_text,
+        flags=re.I,
+    )
+    if not year_match:
+        year_match = re.search(
+            r"circa\s+(19\d{2}|20\d{2})",
+            body_text,
+            flags=re.I,
+        )
+    if year_match:
+        try:
+            year_built = int(year_match.group(1))
+        except Exception:
+            year_built = None
+
+    # ====================================================
+    # 🆕 Energy / EPC rating
+    # ====================================================
+    epc_match = re.search(
+        r"(?:EPC|Energy (?:Performance )?Rating|Energy rating)\s*[:\-]?\s*([A-G][\+\-]?)",
+        body_text,
+        flags=re.I,
+    )
+    if epc_match:
+        energy_rating = epc_match.group(1).upper()
+
+    # ====================================================
+    # 🆕 Refurb intensity heuristic (aus Beschreibung)
+    # ====================================================
+    text = (description or body_text).lower()
+
+    full_terms = [
+        "in need of modernisation",
+        "in need of modernization",
+        "requires modernisation",
+        "requires modernization",
+        "complete refurbishment",
+        "full refurbishment",
+        "total refurbishment",
+        "unmodernised",
+        "unmodernized",
+        "shell condition",
+    ]
+    medium_terms = [
+        "requires some updating",
+        "scope to improve",
+        "scope for improvement",
+        "dated condition",
+        "requires updating",
+        "needs updating",
+    ]
+    light_terms = [
+        "newly refurbished",
+        "recently refurbished",
+        "newly renovated",
+        "recently renovated",
+        "immaculate condition",
+        "turn-key",
+        "turnkey",
+        "ready to move in",
+    ]
+
+    if any(t in text for t in full_terms):
+        refurb_intensity = "full"
+    elif any(t in text for t in medium_terms):
+        refurb_intensity = "medium"
+    elif any(t in text for t in light_terms):
+        refurb_intensity = "light"
+    else:
+        refurb_intensity = "none"
+
+    return (
+        price,
+        property_type,
+        bedrooms,
+        bathrooms,
+        description,
+        floor_area_sqm,
+        year_built,
+        energy_rating,
+        refurb_intensity,
+    )
+
 
 
 # ----------------------------------------------------------
@@ -483,7 +610,18 @@ async def scrape_property(url: str, logger: Optional[Logger] = None) -> Dict[str
     except Exception:
         body_text = ""
 
-    price, property_type, bedrooms, bathrooms, description = parse_from_body_text(body_text)
+    (
+    price,
+    property_type,
+    bedrooms,
+    bathrooms,
+    description,
+    floor_area_sqm,
+    year_built,
+    energy_rating,
+    refurb_intensity,
+) = parse_from_body_text(body_text)
+
 
     # Fallback Description direkt aus DOM
     if not description:
