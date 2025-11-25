@@ -5,9 +5,8 @@ on:
     - cron: "0 3 * * *"  # 03:00 UTC jeden Tag
   workflow_dispatch:      # Manuell starten über GitHub UI
 
-# 👇 WICHTIG: GitHub Actions darf Code schreiben/pushen
 permissions:
-  contents: write
+  contents: write   # GitHub Actions darf auf main pushen
 
 jobs:
   scrape-and-commit:
@@ -24,10 +23,15 @@ jobs:
         with:
           python-version: "3.11"
 
+      # 🔧 System-Dependencies für Playwright / Chromium
       - name: Install system deps for Playwright
         run: |
           sudo apt-get update
-          sudo apt-get install -y libnss3 libxkbcommon0 libgbm1 libasound2
+          sudo apt-get install -y \
+            libnss3 \
+            libxkbcommon0 \
+            libgbm1 \
+            libasound2t64
 
       - name: Install Python dependencies
         run: |
@@ -48,7 +52,6 @@ jobs:
 
           git add estateai.db
 
-          # Wenn nichts geändert wurde -> nicht committen
           if git diff --cached --quiet; then
             echo "No changes in estateai.db – skipping commit."
             exit 0
