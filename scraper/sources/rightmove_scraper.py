@@ -4,6 +4,7 @@ import asyncio
 import re
 import sys
 import subprocess
+from datetime import datetime
 from typing import List, Dict, Any, Optional, Callable
 
 from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeoutError
@@ -142,6 +143,140 @@ async def safe_eval(page, selector: str) -> Optional[str]:
     except Exception:
         return None
     return None
+
+
+# ----------------------------------------------------------
+# Construction-Helper (Wohnfläche, Baujahr, EPC, Zustand)
+# ----------------------------------------------------------
+
+AREA_PATTERNS = [
+    r"(?P<value>\d[\d,\.]*)\s*(sq\.?\s*ft|sqft|sq ft)",
+    r"(?P<value>\d[\d,\.]*)\s*(sq\.?\s*m|sqm|sq m)",
+]
+
+YEAR_PATTERNS = [
+    r"built in\s+(?P<year>19\d{2}|20\d{2})",
+    r"built circa\s+(?P<year>19\d{2}|20\d{2})",
+    r"circa\s+(?P<year>19\d{2}|20\d{2})",
+]
+
+
+def _clean_number(num_str: str) -> Optional[float]:
+    try:
+        num_str = num_str.replace(",", "").strip()
+        return float(num_str)
+    except Exception:
+        return None
+
+
+def extract_floor_area_sqm(text: str) -> Optional[float]:
+    """
+    Sucht nach '850 sq ft' oder '79 sq m' im Text und liefert m².
+    """
+    if not text:
+        return None
+
+    t = text.lower()
+    for pattern in AREA_PATTERNS:
+        m = re.search(pattern, t)
+        if not m:
+            continue
+        val = _clean_number(m.group("value"))
+        if val is None:
+            continue
+
+        unit = m.group(0).lower()
+        if "ft" in unit:
+            # sq ft -> m²
+            return val * 0.092903
+        else:
+            # bereits m²
+            return val
+
+    return None
+
+
+def extract_year_built(text: str) -> Optional[int]:
+    """
+    Sucht 'built in 1930', 'built circa 1900' usw.
+    """
+    if not text:
+        return None
+
+    t = text.lower()
+    for pattern in YEAR_PATTERNS:
+        m = re.search(pattern, t)
+        if m:
+            try:
+                year = int(m.group("year"))
+                if 1800 <= year <= datetime.now().year:
+                    return year
+            except Exception:
+                continue
+    return None
+
+
+def extract_energy_rating(text: str) -> Optional[str]:
+    """
+    Sucht nach 'EPC C', 'EPC rating D', 'Energy performance ... B' etc.
+    """
+    if not text:
+        return None
+
+    t = text.lower()
+    m = re.search(r"epc[^a-g]*([a-g])", t)
+    if m:
+        rating = m.group(1).upper()
+        if rating in list("ABCDEFG"):
+            return rating
+    return None
+
+
+def infer_refurb_intensity(text: str) -> str:
+    """
+    Sehr einfache Heuristik für Refurb-Intensity basierend auf Beschreibung.
+    """
+    if not text:
+        return "none"
+
+    t = text.lower()
+
+    # Full Refurb nötig
+    full_keywords = [
+        "requires complete refurbishment",
+        "in need of complete refurbishment",
+        "in need of modernisation",
+        "requires modernisation",
+        "full refurbishment",
+        "total renovation",
+    ]
+    if any(k in t for k in full_keywords):
+        return "full"
+
+    # Medium
+    medium_keywords = [
+        "scope for improvement",
+        "some updating required",
+        "tired condition",
+        "outdated",
+        "dated interior",
+    ]
+    if any(k in t for k in medium_keywords):
+        return "medium"
+
+    # Light / schon gemacht
+    light_keywords = [
+        "recently refurbished",
+        "newly refurbished",
+        "newly renovated",
+        "recently renovated",
+        "brand new kitchen",
+        "new bathroom",
+    ]
+    if any(k in t for k in light_keywords):
+        return "light"
+
+    return "none"
 
 
 # ----------------------------------------------------------
@@ -313,7 +448,7 @@ async def scrape_property(url: str, logger: Optional[Logger] = None) -> Dict[str
             "bedrooms": None,
             "bathrooms": None,
             "property_type": None,
-            "source": "v4.7_textparse_timeout",
+            "source": "v4.8_textparse_timeout",
             "error": f"timeout: {e}",
         }
 
@@ -356,6 +491,13 @@ async def scrape_property(url: str, logger: Optional[Logger] = None) -> Dict[str
             or await safe_eval(page, "[data-testid='read-full-description']") \
             or ""
 
+    # ---------- NEU: Construction-Felder aus Text ----------
+    combined_text = f"{description}\n\n{body_text}"
+    floor_area_sqm = extract_floor_area_sqm(combined_text)
+    year_built = extract_year_built(combined_text)
+    energy_rating = extract_energy_rating(combined_text)
+    refurb_intensity = infer_refurb_intensity(combined_text)
+
     await browser.close()
     await pw.stop()
 
@@ -368,7 +510,11 @@ async def scrape_property(url: str, logger: Optional[Logger] = None) -> Dict[str
         "bedrooms": bedrooms,
         "bathrooms": bathrooms,
         "property_type": property_type,
-        "source": "v4.7_textparse",
+        "floor_area_sqm": floor_area_sqm,
+        "year_built": year_built,
+        "energy_rating": energy_rating,
+        "refurb_intensity": refurb_intensity,
+        "source": "v4.8_textparse_construction",
     }
 
 
