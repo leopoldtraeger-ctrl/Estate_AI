@@ -32,8 +32,19 @@ from scraper.sources.rightmove_scraper import scrape_all_sync
 # 🆕 Benchmarks-Seed
 from database.seed_benchmarks import seed_all_benchmarks
 
+# =========================
 # Analytics API
-API_URL = os.getenv("ESTATEAI_API_URL", "http://127.0.0.1:8000")
+# =========================
+
+# Auf Streamlit Cloud gibt es KEIN lokales 127.0.0.1:8000.
+# Wenn ESTATEAI_API_URL nicht gesetzt ist, gelten Capex/Refurb als "deaktiviert".
+API_URL = os.getenv("ESTATEAI_API_URL")
+
+
+def analytics_available() -> bool:
+    """True, wenn ein externes Analytics-Backend konfiguriert ist."""
+    return bool(API_URL)
+
 
 # =========================
 # OpenAI-Client für Chat
@@ -79,18 +90,36 @@ def ensure_db_initialized() -> None:
 # =========================
 
 def load_summary() -> Dict[str, Any]:
+    """
+    Aggregierte KPIs für das Dashboard.
+    Trennt zwischen SALE- und RENT-Listings.
+    """
     with get_session() as session:
-        total_listings = session.scalar(select(func.count(models.Listing.id)))
-        max_price = session.scalar(select(func.max(models.Listing.price)))
-        avg_price = session.scalar(select(func.avg(models.Listing.price)))
-        avg_beds = session.scalar(select(func.avg(models.Listing.bedrooms)))
+        total_listings = session.scalar(select(func.count(models.Listing.id))) or 0
 
-        return {
-            "total_listings": total_listings or 0,
-            "max_price": max_price or 0,
-            "avg_price": avg_price or 0,
-            "avg_beds": avg_beds or 0,
-        }
+        total_sale = session.scalar(
+            select(func.count(models.Listing.id)).where(models.Listing.listing_type == "sale")
+        ) or 0
+
+        total_rent = session.scalar(
+            select(func.count(models.Listing.id)).where(models.Listing.listing_type == "rent")
+        ) or 0
+
+        max_price_sale = session.scalar(
+            select(func.max(models.Listing.price)).where(models.Listing.listing_type == "sale")
+        ) or 0
+
+        avg_price_sale = session.scalar(
+            select(func.avg(models.Listing.price)).where(models.Listing.listing_type == "sale")
+        ) or 0
+
+    return {
+        "total_listings": total_listings,
+        "total_sale": total_sale,
+        "total_rent": total_rent,
+        "max_price_sale": max_price_sale,
+        "avg_price_sale": avg_price_sale,
+    }
 
 
 def load_distinct_property_types() -> List[str]:
@@ -106,8 +135,16 @@ def load_listings(
     max_price: Optional[float] = None,
     min_beds: Optional[int] = None,
     prop_type: Optional[str] = None,
+    listing_type: Optional[str] = None,
     limit: int = 200,
 ) -> List[Dict[str, Any]]:
+    """
+    Holt Listings aus der DB inkl. Filter:
+    - Preis
+    - Bedrooms
+    - Property Type
+    - Listing Type (sale / rent)
+    """
     with get_session() as session:
         stmt = (
             select(
@@ -118,6 +155,7 @@ def load_listings(
                 models.Listing.bedrooms,
                 models.Listing.bathrooms,
                 models.Listing.property_type,
+                models.Listing.listing_type,
                 models.Listing.description,
             )
             .order_by(models.Listing.price.desc())
@@ -132,6 +170,8 @@ def load_listings(
             stmt = stmt.where(models.Listing.bedrooms >= min_beds)
         if prop_type and prop_type != "All":
             stmt = stmt.where(models.Listing.property_type == prop_type)
+        if listing_type and listing_type != "All":
+            stmt = stmt.where(models.Listing.listing_type == listing_type)
 
         rows = session.execute(stmt).all()
 
@@ -149,6 +189,7 @@ def load_listings(
                 "bedrooms": r.bedrooms,
                 "bathrooms": r.bathrooms,
                 "type": r.property_type,
+                "listing_type": r.listing_type,
                 "description": short_desc,
                 "description_full": desc,
             }
@@ -214,17 +255,19 @@ def extract_property_ids_from_question(question: str) -> List[int]:
 
 
 # =========================
-# Scraper + Ingest
+# Scraper + Ingest (LOCAL USE)
 # =========================
 
 def refresh_data(location: str = "London", pages: int = 1):
     """
     Läuft deinen Scraper + Ingest einmal durch,
     um neue Rightmove-Daten zu holen.
+    Hinweis:
+    - Für LOCAL DEV gedacht.
+    - Auf Streamlit Cloud sollte der Nightly-Job (GitHub) laufen.
     """
     ensure_db_initialized()
 
-    # In der Cloud wird Playwright evtl. nicht laufen – Fehler dann im Log.
     results = scrape_all_sync(location=location, pages=pages)
 
     total, success, error = ingest_bulk_results(
@@ -321,21 +364,22 @@ def build_chat_context(max_listings: int = 30) -> str:
     lines.append(
         "High-level database summary:\n"
         f"- Total listings in DB: {summary['total_listings']}\n"
-        f"- Max price: £{summary['max_price']:,.0f}\n"
-        f"- Average price: £{summary['avg_price']:,.0f}\n"
-        f"- Average bedrooms: {summary['avg_beds']:.2f}\n"
+        f"- SALE listings: {summary['total_sale']}\n"
+        f"- RENT listings: {summary['total_rent']}\n"
+        f"- Max SALE price: £{summary['max_price_sale']:,.0f}\n"
+        f"- Average SALE price: £{summary['avg_price_sale']:,.0f}\n"
     )
 
     if not listings:
         lines.append("\nNo individual listings available yet.")
         return "\n".join(lines)
 
-    lines.append("\nSample listings (id, price, bedrooms, bathrooms, type):")
+    lines.append("\nSample listings (id, price, bedrooms, bathrooms, type, listing_type):")
     for l in listings[:max_listings]:
         lines.append(
             f"- id={l['id']}, price={l['price']}, "
             f"bedrooms={l['bedrooms']}, bathrooms={l['bathrooms']}, "
-            f"type={l['type']}"
+            f"type={l['type']}, listing_type={l['listing_type']}"
         )
 
     return "\n".join(lines)
@@ -455,36 +499,14 @@ def ask_chat_model(question: str, context: str) -> str:
 # =========================
 
 def render_listings_tab():
-    # --- Data Controls: Refresh-Button ---
-    with st.expander("Data controls (Scraper)", expanded=True):
-        col_r1, col_r2 = st.columns([1, 3])
-
-        if col_r1.button("🔄 Fetch latest data from Rightmove"):
-            status_box = st.empty()
-            status_box.info("Step 1/3: Starting Rightmove scraper (Playwright)…")
-
-            with st.spinner("Scraping & ingesting latest Rightmove data…"):
-                try:
-                    total, success, error = refresh_data(location="London", pages=1)
-                    status_box.success("Step 3/3: Done. Database updated with latest listings ✅")
-                    st.success(f"Scrape run finished: total={total}, success={success}, error={error}")
-                except Exception as e:
-                    status_box.error(f"Error while scraping: {e}")
-                    st.error(f"Scraper error: {e}")
-
-        st.caption(
-            "Der Button triggert den Rightmove-Scraper (Playwright) und schreibt die Ergebnisse in die estateai.db."
-        )
-
-    st.markdown("---")
-
-    # --- Summary KPIs ---
+    # --- Summary KPIs (ohne Scraper-Button) ---
     summary = load_summary()
+
     col1, col2, col3, col4 = st.columns(4)
-    col1.metric("Total Listings", summary["total_listings"])
-    col2.metric("Max Price (GBP)", f"{summary['max_price']:,.0f}")
-    col3.metric("Avg Price (GBP)", f"{summary['avg_price']:,.0f}")
-    col4.metric("Avg Bedrooms", f"{summary['avg_beds']:.2f}")
+    col1.metric("SALE Listings", summary["total_sale"])
+    col2.metric("RENT Listings", summary["total_rent"])
+    col3.metric("Max Price (SALE, GBP)", f"{summary['max_price_sale']:,.0f}")
+    col4.metric("Avg Price (SALE, GBP)", f"{summary['avg_price_sale']:,.0f}")
 
     st.markdown("---")
 
@@ -493,12 +515,13 @@ def render_listings_tab():
 
     prop_types = ["All"] + load_distinct_property_types()
 
-    col_f1, col_f2, col_f3, col_f4 = st.columns(4)
+    col_f1, col_f2, col_f3, col_f4, col_f5 = st.columns(5)
 
     min_price = col_f1.number_input("Min Price (GBP)", value=0.0, step=1_000_000.0)
     max_price = col_f2.number_input("Max Price (GBP)", value=100_000_000.0, step=1_000_000.0)
     min_beds = col_f3.number_input("Min Bedrooms", value=0, step=1)
     prop_type = col_f4.selectbox("Property Type", options=prop_types)
+    listing_type_filter = col_f5.selectbox("Listing Type", options=["All", "sale", "rent"])
 
     st.markdown("---")
 
@@ -508,6 +531,7 @@ def render_listings_tab():
         max_price=max_price or None,
         min_beds=min_beds or None,
         prop_type=prop_type,
+        listing_type=listing_type_filter if listing_type_filter != "All" else None,
         limit=200,
     )
 
@@ -519,13 +543,14 @@ def render_listings_tab():
         st.subheader(f"📄 Listings (Treffer: {len(listings)})")
 
         if not listings:
-            st.info("Keine Listings gefunden – eventuell Filter anpassen oder Scraper laufen lassen.")
+            st.info("Keine Listings gefunden – eventuell Filter anpassen oder Scraper/Nightly-Job laufen lassen.")
             return
 
         table_data = [
             {
                 "ID": l["id"],
                 "Property ID": l["property_id"],
+                "Listing Type": l["listing_type"],
                 "Price (GBP)": l["price"],
                 "Bedrooms": l["bedrooms"],
                 "Bathrooms": l["bathrooms"],
@@ -555,6 +580,7 @@ def render_listings_tab():
                 st.write(f"**Price:** £{selected['price']:,.0f}")
             else:
                 st.write("**Price:** n/a")
+            st.write(f"**Listing Type:** {selected['listing_type']}")
             st.write(f"**Bedrooms:** {selected['bedrooms']}")
             st.write(f"**Bathrooms:** {selected['bathrooms']}")
             st.write(f"**Type:** {selected['type']}")
@@ -597,11 +623,19 @@ def render_listings_tab():
     with tab_capex:
         st.subheader("🔧 Renovation & Capex Copilot")
 
-        if "selected_property" not in st.session_state:
+        if not analytics_available():
+            st.info(
+                "Die Capex-Analyse ist derzeit nur verfügbar, wenn ein externes "
+                "EstateAI-Backend (FastAPI) über `ESTATEAI_API_URL` konfiguriert ist.\n\n"
+                "In dieser Streamlit-Cloud-Version werden hier keine Berechnungen ausgeführt."
+            )
+        elif "selected_property" not in st.session_state:
             st.info("Bitte zuerst im Tab 'Listings Overview' ein Listing auswählen.")
         else:
             prop = st.session_state["selected_property"]
+
             st.markdown(f"**Ausgewähltes Listing:** ID {prop['id']} – Property ID {prop['property_id']}")
+            st.write(f"Listing Type: {prop['listing_type']}")
             st.write(f"Preis: £{prop['price']:,.0f}" if prop["price"] else "Preis: n/a")
 
             spec_level = st.selectbox("Ausbau-Standard", ["basic", "standard", "premium"], index=1)
@@ -656,7 +690,13 @@ def render_listings_tab():
     with tab_refurb:
         st.subheader("🏗️ Refurb Rating & Energy Risk")
 
-        if "selected_property" not in st.session_state:
+        if not analytics_available():
+            st.info(
+                "Die Refurb- & Energierisiko-Analyse ist derzeit nur mit einem externen "
+                "EstateAI-Backend verfügbar (`ESTATEAI_API_URL`).\n\n"
+                "In dieser Streamlit-Cloud-Version werden dafür keine API-Calls ausgeführt."
+            )
+        elif "selected_property" not in st.session_state:
             st.info("Bitte zuerst im Tab 'Listings Overview' ein Listing auswählen.")
         else:
             prop = st.session_state["selected_property"]
@@ -700,7 +740,8 @@ def render_chat_tab():
     if summary_for_chat["total_listings"] == 0:
         st.warning(
             "Aktuell sind noch keine Listings in der Datenbank. "
-            "Bitte zuerst im Tab **Listings** den Scraper laufen lassen."
+            "Bitte zuerst den Nightly-Scraper laufen lassen (GitHub) "
+            "oder lokal einmal scrapen."
         )
         return
 
@@ -799,7 +840,8 @@ def main():
 
     st.markdown(
         "Dieses Dashboard zeigt echte Rightmove-Daten, "
-        "gescraped mit unserem Playwright-Scraper und in einer strukturierten Datenbank gespeichert."
+        "gescraped mit unserem Playwright-Scraper und in einer strukturierten Datenbank gespeichert.\n\n"
+        "Die Daten kommen entweder aus deinem lokalen Scraper-Run oder dem automatischen Nightly-Scraper."
     )
 
     tab_listings, tab_chat = st.tabs(["Listings", "AI Assistant"])
