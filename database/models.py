@@ -21,9 +21,11 @@ from sqlalchemy import (
     ForeignKey,
     Text,
 )
-from sqlalchemy.orm import relationship
+from sqlalchemy.orm import relationship, declarative_base
 
-from .connection import Base
+# WICHTIG: Base kommt NICHT mehr aus connection.py,
+# sondern wird hier direkt definiert.
+Base = declarative_base()
 
 
 # --------------------------------------

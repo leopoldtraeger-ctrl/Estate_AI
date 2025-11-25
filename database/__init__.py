@@ -1,16 +1,15 @@
-"""
-Database package for EstateAI.
+from .connection import engine, get_session, init_db
+from .models import Base, Market, Submarket, Property, Listing, RawScrape, ScrapeRun
 
-Usage example:
-
-    from database import init_db, get_session
-    from database import crud, models
-
-    init_db()
-    with get_session() as session:
-        ...
-
-"""
-
-from .connection import init_db, get_session, Base, engine
-from . import models, crud  # noqa: F401
+__all__ = [
+    "engine",
+    "get_session",
+    "init_db",
+    "Base",
+    "Market",
+    "Submarket",
+    "Property",
+    "Listing",
+    "RawScrape",
+    "ScrapeRun",
+]
