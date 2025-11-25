@@ -35,19 +35,9 @@ from scraper.sources.rightmove_scraper import scrape_all_sync
 # =========================
 
 try:
-    # requires: openai>=1.0.0 in requirements.txt
     from openai import OpenAI
 
-    # 1) Erst normale Umgebungsvariable probieren (lokal, GitHub Actions etc.)
     api_key = os.getenv("OPENAI_API_KEY")
-
-    # 2) Falls leer, in Streamlit-Secrets nachsehen (Cloud)
-    if not api_key:
-        try:
-            api_key = st.secrets["OPENAI_API_KEY"]
-        except Exception:
-            api_key = None
-
     if not api_key:
         raise RuntimeError("OPENAI_API_KEY is not set")
 
@@ -248,8 +238,8 @@ def get_listing_images(url: str) -> List[str]:
         headers = {
             "User-Agent": (
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/123.0.0.0 Safari/537.36"
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/123.0.0.0 Safari/537.36"
             ),
             "Accept-Language": "en-GB,en;q=0.9",
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
@@ -312,15 +302,21 @@ def build_chat_context(max_listings: int = 30) -> str:
     summary = load_summary()
     listings = load_listings(limit=max_listings)
 
-    lines = []
+    lines: List[str] = []
+
     lines.append(
-        f"Summary: {summary['total_listings']} listings in DB, "
-        f"max price ≈ £{summary['max_price']:,.0f}, "
-        f"average price ≈ £{summary['avg_price']:,.0f}, "
-        f"average bedrooms ≈ {summary['avg_beds']:.2f}.\n"
+        "High-level database summary:\n"
+        f"- Total listings in DB: {summary['total_listings']}\n"
+        f"- Max price: £{summary['max_price']:,.0f}\n"
+        f"- Average price: £{summary['avg_price']:,.0f}\n"
+        f"- Average bedrooms: {summary['avg_beds']:.2f}\n"
     )
 
-    lines.append("Sample listings (id, price, bedrooms, bathrooms, type):")
+    if not listings:
+        lines.append("\nNo individual listings available yet.")
+        return "\n".join(lines)
+
+    lines.append("\nSample listings (id, price, bedrooms, bathrooms, type):")
     for l in listings[:max_listings]:
         lines.append(
             f"- id={l['id']}, price={l['price']}, "
@@ -344,17 +340,38 @@ def build_chat_context_for_question(question: str, max_listings: int = 30) -> st
     lines = [base_context]
 
     if focus_ids:
-        lines.append("\n\nFocus listings mentioned in the question:")
+        lines.append("\n\nFocus listings mentioned in the question (full details where available):")
         for lid in focus_ids:
             listing = load_listing_by_id(lid)
             if listing:
+                price = listing["price"]
+                price_str = f"£{price:,.0f}" if price is not None and not math.isnan(price) else "n/a"
+
                 lines.append(
-                    f"- id={listing['id']}, price={listing['price']}, "
+                    f"- id={listing['id']}, price={price_str}, "
                     f"bedrooms={listing['bedrooms']}, bathrooms={listing['bathrooms']}, "
                     f"type={listing['type']}, url={listing['url']}"
                 )
             else:
                 lines.append(f"- id={lid} (not found in DB)")
+
+    # Kleiner Hint für das Modell, was der User vermutlich will
+    q_lower = question.lower()
+    intent_hints: List[str] = []
+    if any(w in q_lower for w in ["rendite", "yield", "cap rate", "miete", "rental"]):
+        intent_hints.append(
+            "- The user is asking about rental yield / cap rate or income-based valuation. "
+            "You should compute yields where possible and show the formula."
+        )
+    if any(w in q_lower for w in ["teuer", "billig", "expensive", "cheap", "overpriced", "underpriced"]):
+        intent_hints.append(
+            "- The user is asking whether a listing is expensive or cheap compared to the rest of the database. "
+            "Compare the price level (and price per bedroom if useful) to averages in the context."
+        )
+
+    if intent_hints:
+        lines.append("\n\nIntent hints for you as the model:")
+        lines.extend(intent_hints)
 
     return "\n".join(lines)
 
@@ -366,39 +383,61 @@ def ask_chat_model(question: str, context: str) -> str:
     """
     if openai_client is None:
         return (
-            "The AI assistant is not configured yet (missing OpenAI client or API key). "
-            "Please set OPENAI_API_KEY (e.g. in Streamlit Secrets) and make sure "
-            "the 'openai' package is installed from requirements.txt."
+            "The AI assistant is not configured yet (missing OpenAI client or API key).\n"
+            "Please set OPENAI_API_KEY (e.g. in Streamlit Secrets) and make sure the "
+            "'openai' package is installed."
         )
+
+    # System-Prompt: Investor- / Analyst-Modus, klare Struktur, Rückfragen wenn Daten fehlen
+    system_content = (
+        "You are EstateAI, a real estate & finance analyst working with a snapshot of "
+        "Rightmove listings stored in a database.\n\n"
+        "CRITICAL RULES:\n"
+        "1) You may ONLY use numeric facts that appear in the provided database context. "
+        "   Never invent concrete prices, rents, yields, or addresses.\n"
+        "2) If important numeric inputs are missing (e.g. purchase price, expected rent, "
+        "   specific listing ID, number of bedrooms), do NOT guess. Instead:\n"
+        "   - Explain briefly which data is missing.\n"
+        "   - Ask up to TWO very concrete follow-up questions to get that data.\n"
+        "   - Do NOT output fake numbers just to give a complete answer.\n"
+        "3) Answer in the same language as the user's question (German or English).\n\n"
+        "OUTPUT STRUCTURE (unless the user explicitly asks for a different format):\n"
+        "1. Short answer (1–3 sentences).\n"
+        "2. Key numbers (bullet points with concrete figures from the context; include formulas "
+        "   if you compute yields or ratios).\n"
+        "3. Interpretation & investor view (how attractive is this, what is upside/downside, "
+        "   how does it compare to other listings in the context).\n\n"
+        "YIELD / RENTAL QUESTIONS:\n"
+        "- When the user mentions a target yield (e.g. 4.5%), compute the implied annual and "
+        "  monthly rent if the purchase price is known.\n"
+        "- Clearly show the formula you use.\n"
+        "- Compare the result qualitatively to the rest of the portfolio where possible.\n\n"
+        "COMPARISON QUESTIONS (e.g. 'Is this expensive?'):\n"
+        "- Compare the listing's price to averages in the context (overall and for similar "
+        "  bedroom counts if possible).\n"
+        "- Talk in relative terms (+/- %, above/below average) when the context allows it.\n"
+    )
+
+    messages = [
+        {
+            "role": "system",
+            "content": system_content,
+        },
+        {
+            "role": "user",
+            "content": (
+                f"Database context (Rightmove scrape):\n{context}\n\n"
+                f"User question:\n{question}"
+            ),
+        },
+    ]
 
     completion = openai_client.chat.completions.create(
         model="gpt-4.1-mini",
-        temperature=0.2,
-        messages=[
-            {
-                "role": "system",
-                "content": (
-                    "You are EstateAI, a real estate & finance analyst. "
-                    "Use ONLY the provided database context to answer questions about prices, "
-                    "price levels, distributions, property types and simple financial "
-                    "calculations (yields, affordability, comparisons). "
-                    "If the user references a specific listing ID, focus on the "
-                    "'Focus listings' section when comparing it with the overall database. "
-                    "If the user asks about taxes or regulations, you can answer in general, "
-                    "but for numeric statements about these Rightmove listings you must rely "
-                    "on the context only."
-                ),
-            },
-            {
-                "role": "user",
-                "content": (
-                    f"Database context (Rightmove scrape):\n{context}\n\n"
-                    f"User question:\n{question}"
-                ),
-            },
-        ],
+        temperature=0.15,
+        messages=messages,
     )
-    return completion.choices[0].message.content
+    return completion.choices[0].message.content.strip()
 
 
 # =========================
@@ -465,7 +504,7 @@ def render_listings_tab():
     st.subheader(f"📄 Listings (Treffer: {len(listings)})")
 
     if not listings:
-        st.info("Keine Listings gefunden – eventuell Filter anpassen.")
+        st.info("Keine Listings gefunden – eventuell Filter anpassen oder Scraper laufen lassen.")
         return
 
     table_data = [
@@ -543,8 +582,23 @@ def render_chat_tab():
         "- Beispiele: *„Wie ist die durchschnittliche Anzahl Zimmer?“*, "
         "*„Wie verteilen sich die Preise?“*, "
         "*„Ist Listing 5 im Vergleich zu den anderen teuer?“*, "
-        "*„Wie hoch wäre die Brutto-Mietrendite bei X % Mietrendite-Annahme?“*"
+        "*„Wie hoch wäre die Brutto-Mietrendite bei 4,5 % Rendite-Annahme?“*"
     )
+
+    # Warnung, falls keine Listings vorhanden
+    summary_for_chat = load_summary()
+    if summary_for_chat["total_listings"] == 0:
+        st.warning(
+            "Aktuell sind noch keine Listings in der Datenbank. "
+            "Bitte zuerst im Tab **Listings** den Scraper laufen lassen."
+        )
+        return
+
+    if openai_client is None:
+        st.warning(
+            "OPENAI_API_KEY ist nicht gesetzt oder der Client konnte nicht initialisiert werden.\n"
+            "Bitte den API Key in den Streamlit Secrets oder der .env-Datei hinterlegen."
+        )
 
     if "chat_messages" not in st.session_state:
         st.session_state["chat_messages"] = []
