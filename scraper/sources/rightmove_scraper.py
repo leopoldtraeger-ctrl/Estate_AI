@@ -685,6 +685,71 @@ async def scrape_all(
 
 
 # ----------------------------------------------------------
+# RENTAL WORKFLOW
+# ----------------------------------------------------------
+async def fetch_rental_links(
+    location: str = "London",
+    max_pages: int = 1,
+    logger: Optional[Logger] = None,
+) -> List[str]:
+    if logger is None:
+        logger = print
+
+    pw, browser, page = await launch_browser(logger=logger)
+
+    logger(f"➡️ Fetching Rightmove *rental* listings for: {location}")
+
+    loc_id = "REGION^87490"  # London
+
+    links: List[str] = []
+
+    for p in range(max_pages):
+        url = f"{BASE}/property-to-rent/find.html?locationIdentifier={loc_id}&index={p * 24}"
+
+        logger(f"📄 Loading RENT listing page: {url}")
+        await page.goto(url, timeout=70000)
+        await accept_cookies(page)
+        await page.wait_for_timeout(2000)
+
+        cards = await page.query_selector_all("a.propertyCard-link")
+
+        for c in cards:
+            href = await c.get_attribute("href")
+            if href and "/properties/" in href:
+                clean = BASE + href.split("?")[0]
+                links.append(clean)
+
+    await browser.close()
+    await pw.stop()
+
+    return list(set(links))
+
+
+async def scrape_all_rentals(
+    location: str = "London",
+    pages: int = 1,
+    logger: Optional[Logger] = None,
+) -> List[Dict[str, Any]]:
+    if logger is None:
+        logger = print
+
+    links = await fetch_rental_links(location, pages, logger=logger)
+    logger(f"📦 [RENT] {len(links)} rental listings found.")
+
+    results: List[Dict[str, Any]] = []
+
+    for idx, url in enumerate(links):
+        logger(f"➡️ [RENT] {idx + 1}/{len(links)} → {url}")
+        try:
+            data = await scrape_property(url, logger=logger)
+            results.append(data)
+        except Exception as e:
+            logger(f"❌ ERROR scraping RENT {url}: {e}")
+
+    return results
+
+
+# ----------------------------------------------------------
 # Sync wrapper (für Pipelines & FastAPI)
 # ----------------------------------------------------------
 def scrape_all_sync(
@@ -693,3 +758,11 @@ def scrape_all_sync(
     logger: Optional[Logger] = None,
 ) -> List[Dict[str, Any]]:
     return asyncio.run(scrape_all(location, pages, logger=logger))
+
+
+def scrape_all_rentals_sync(
+    location: str = "London",
+    pages: int = 1,
+    logger: Optional[Logger] = None,
+) -> List[Dict[str, Any]]:
+    return asyncio.run(scrape_all_rentals(location, pages, logger=logger))
