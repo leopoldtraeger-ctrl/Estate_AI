@@ -35,9 +35,19 @@ from scraper.sources.rightmove_scraper import scrape_all_sync
 # =========================
 
 try:
+    # requires: openai>=1.0.0 in requirements.txt
     from openai import OpenAI
 
+    # 1) Erst normale Umgebungsvariable probieren (lokal, GitHub Actions etc.)
     api_key = os.getenv("OPENAI_API_KEY")
+
+    # 2) Falls leer, in Streamlit-Secrets nachsehen (Cloud)
+    if not api_key:
+        try:
+            api_key = st.secrets["OPENAI_API_KEY"]
+        except Exception:
+            api_key = None
+
     if not api_key:
         raise RuntimeError("OPENAI_API_KEY is not set")
 
@@ -357,7 +367,8 @@ def ask_chat_model(question: str, context: str) -> str:
     if openai_client is None:
         return (
             "The AI assistant is not configured yet (missing OpenAI client or API key). "
-            "Please set OPENAI_API_KEY (e.g. in Streamlit Secrets) and install the 'openai' package."
+            "Please set OPENAI_API_KEY (e.g. in Streamlit Secrets) and make sure "
+            "the 'openai' package is installed from requirements.txt."
         )
 
     completion = openai_client.chat.completions.create(
