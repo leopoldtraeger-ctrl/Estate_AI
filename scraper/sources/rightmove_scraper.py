@@ -656,6 +656,7 @@ async def scrape_property(url: str, logger: Optional[Logger] = None) -> Dict[str
     }
 
 
+
 # ----------------------------------------------------------
 # Complete Workflow: Listings → Property Details
 # ----------------------------------------------------------
