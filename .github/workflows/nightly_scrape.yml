@@ -2,64 +2,45 @@ name: Nightly Rightmove Scrape
 
 on:
   schedule:
-    - cron: "0 3 * * *"  # 03:00 UTC jeden Tag
-  workflow_dispatch:      # Manuell starten über GitHub UI
-
-permissions:
-  contents: write   # GitHub Actions darf auf main pushen
+    # 3:00 CET ~ 02:00 UTC im Winter (ggf. anpassen)
+    - cron: "0 2 * * *"
+  workflow_dispatch: {}  # manuell starten möglich
 
 jobs:
-  scrape-and-commit:
+  scrape:
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0
+          persist-credentials: true
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      # 🔧 System-Dependencies für Playwright / Chromium
-      - name: Install system deps for Playwright
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            libnss3 \
-            libxkbcommon0 \
-            libgbm1 \
-            libasound2t64
-
-      - name: Install Python dependencies
+      - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
           python -m playwright install --with-deps chromium
 
-      - name: Run nightly scrape
-        env:
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      - name: Run nightly scraper (SALE + RENT)
         run: |
-          python nightly_scrape.py
+          python scripts/nightly_scrape.py
 
-      - name: Commit updated database
+      - name: Commit updated estateai.db (if changed)
         run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git config user.name "estateai-bot"
+          git config user.email "estateai-bot@users.noreply.github.com"
 
-          git add estateai.db
-
-          if git diff --cached --quiet; then
-            echo "No changes in estateai.db – skipping commit."
-            exit 0
+          if git status --porcelain estateai.db | grep -q "M estateai.db"; then
+            echo "estateai.db changed – committing…"
+            git add estateai.db
+            git commit -m "Nightly scrape update"
+            git push
+          else
+            echo "No changes in estateai.db – nothing to commit."
           fi
-
-          git commit -m "Nightly scrape: update estateai.db"
-
-      - name: Push changes
-        run: |
-          git push origin main
-

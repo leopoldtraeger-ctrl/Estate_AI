@@ -1,67 +1,70 @@
-# nightly_scrape.py
+# scripts/nightly_scrape.py
+
 """
-Nightly Job für GitHub Actions / Cron:
-- Rightmove SALE scrapen
-- Rightmove RENT scrapen
-- Alle Daten in estateai.db schreiben
-- Mietspiegel (rent_benchmarks) neu berechnen
+Nightly scraper for EstateAI.
+
+- Scrapes SALE & RENT listings from Rightmove
+- Writes everything into estateai.db via ingest_bulk_results
 """
 
 from database.connection import get_session
 from database.models import Base
+from database.seed_benchmarks import seed_all_benchmarks
 from database.ingest import ingest_bulk_results
-
-from scraper.sources.rightmove_scraper import scrape_all_sync
-from scraper.sources.rightmove_rent_scraper import scrape_all_rentals_sync
-
-from pipelines.build_rent_benchmarks import build_rent_benchmarks
+from scraper.sources.rightmove_scraper import (
+    scrape_all_sync,
+    scrape_all_rentals_sync,
+)
 
 
 def ensure_db_initialized() -> None:
     """
-    Stellt sicher, dass alle Tabellen existieren.
-    (Falls du noch seed_benchmarks benutzt, kannst du das hier auch reinziehen.)
+    Create tables if they don't exist and seed benchmarks.
     """
-    with get_session() as s:
-        bind = s.get_bind()
+    with get_session() as session:
+        bind = session.get_bind()
         Base.metadata.create_all(bind=bind)
+        # idempotent: nur wenn leer
+        seed_all_benchmarks(session)
 
 
-def run_nightly(location: str = "London", pages: int = 5) -> None:
+def run_nightly_scrape(
+    location: str = "London",
+    sale_pages: int = 20,
+    rent_pages: int = 20,
+) -> None:
+    """
+    Main entrypoint for the nightly job.
+    Increase sale_pages / rent_pages wenn du mehr Daten willst.
+    """
     ensure_db_initialized()
 
-    # 1) SALE – Kaufangebote
-    print("=== Scraping SALE listings ===")
-    sale_results = scrape_all_sync(location=location, pages=pages)
-    print(f"Scraped SALE listings: {len(sale_results)}")
+    # -------- SALE --------
+    print(f"▶ Scraping SALE listings for {location}, pages={sale_pages}")
+    sale_results = scrape_all_sync(location=location, pages=sale_pages)
+    print(f"SALE scraped: {len(sale_results)} rows")
 
-    ingest_sale = ingest_bulk_results(
+    total_s, success_s, error_s = ingest_bulk_results(
         sale_results,
         portal="rightmove",
-        location_query=f"{location} (sale), pages={pages}",
+        location_query=f"{location}, pages={sale_pages}",
         listing_type="sale",
     )
-    print("Ingest SALE result:", ingest_sale)
+    print(f"SALE ingest result: total={total_s}, success={success_s}, error={error_s}")
 
-    # 2) RENT – Mietangebote
-    print("=== Scraping RENT listings ===")
-    rent_results = scrape_all_rentals_sync(location=location, pages=pages)
-    print(f"Scraped RENT listings: {len(rent_results)}")
+    # -------- RENT --------
+    print(f"▶ Scraping RENT listings for {location}, pages={rent_pages}")
+    rent_results = scrape_all_rentals_sync(location=location, pages=rent_pages)
+    print(f"RENT scraped: {len(rent_results)} rows")
 
-    ingest_rent = ingest_bulk_results(
+    total_r, success_r, error_r = ingest_bulk_results(
         rent_results,
         portal="rightmove",
-        location_query=f"{location} (rent), pages={pages}",
+        location_query=f"{location}, pages={rent_pages}",
         listing_type="rent",
     )
-    print("Ingest RENT result:", ingest_rent)
-
-    # 3) Mietspiegel / Benchmarks
-    print("=== Building rent benchmarks ===")
-    created = build_rent_benchmarks()
-    print(f"Rent benchmark buckets created: {created}")
+    print(f"RENT ingest result: total={total_r}, success={success_r}, error={error_r}")
 
 
 if __name__ == "__main__":
-    # Default: London, 5 Seiten – genau wie dein bisheriger Job
-    run_nightly(location="London", pages=5)
+    run_nightly_scrape()
