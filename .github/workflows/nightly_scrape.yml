@@ -1,0 +1,50 @@
+name: Nightly Rightmove Scrape
+
+on:
+  schedule:
+    # Jeden Tag um 03:00 UTC
+    - cron: "0 3 * * *"
+  workflow_dispatch: {}  # manuell starten möglich
+
+jobs:
+  scrape-and-commit:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Python dependencies
+        run:
+          pip install -r requirements.txt
+
+      - name: Install Playwright browsers
+        run: |
+          python -m playwright install --with-deps chromium
+
+      - name: Run nightly scraper
+        run: |
+          python nightly_scrape.py
+
+      - name: Commit updated DB (if changed)
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          # Nur committen, wenn sich estateai.db geändert hat
+          if [[ -n "$(git status --porcelain estateai.db)" ]]; then
+            git add estateai.db
+            git commit -m "Nightly scrape: update estateai.db"
+            git push
+          else
+            echo "No DB changes to commit."
+          fi
+        env:
+          # GitHub Actions stellt automatisch ein Token bereit
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+

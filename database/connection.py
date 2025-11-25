@@ -1,50 +1,47 @@
-"""
-Connection & Session management for EstateAI database.
-Uses SQLite for pitch/demo, but is Postgres-ready.
-"""
+from contextlib import contextmanager
+from pathlib import Path
 
 from sqlalchemy import create_engine
-from sqlalchemy.orm import declarative_base, sessionmaker
+from sqlalchemy.orm import sessionmaker
 
-# For pitch/demo: local SQLite file.
-# For Postgres later, change to e.g.:
-# "postgresql+psycopg2://user:password@localhost:5432/estateai"
-DATABASE_URL = "sqlite:///estateai.db"
+from .models import Base
 
-# SQLAlchemy Base & Engine
-Base = declarative_base()
+# SQLite-DB im Projektroot:
+DB_PATH = Path(__file__).resolve().parents[1] / "estateai.db"
+DATABASE_URL = f"sqlite:///{DB_PATH}"
+
+# Engine bauen
 engine = create_engine(
     DATABASE_URL,
+    echo=False,        # auf True stellen, wenn du SQL sehen willst
     future=True,
-    echo=False,  # auf True stellen, wenn du SQL sehen willst
 )
 
-# Session factory
+# Tabellen automatisch anlegen (idempotent)
+Base.metadata.create_all(bind=engine)
+
+# SessionFactory
 SessionLocal = sessionmaker(
     bind=engine,
-    autoflush=False,
     autocommit=False,
+    autoflush=False,
     future=True,
 )
 
 
+@contextmanager
 def get_session():
     """
-    Returns a new SQLAlchemy Session.
-    Use with context manager:
-
-        with get_session() as session:
-            ...
-
+    Contextmanager für DB-Session:
+    with get_session() as session:
+        ...
     """
-    return SessionLocal()
-
-
-def init_db():
-    """
-    Initialize database: import models and create tables if missing.
-    """
-    # Import models so that they are registered on Base.metadata
-    from . import models  # noqa: F401
-
-    Base.metadata.create_all(bind=engine)
+    session = SessionLocal()
+    try:
+        yield session
+        session.commit()
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
