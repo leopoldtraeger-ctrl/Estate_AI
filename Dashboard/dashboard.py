@@ -238,8 +238,8 @@ def get_listing_images(url: str) -> List[str]:
         headers = {
             "User-Agent": (
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/123.0.0.0 Safari/537.36"
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/123.0.0.0 Safari/537.36"
             ),
             "Accept-Language": "en-GB,en;q=0.9",
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
@@ -355,7 +355,7 @@ def build_chat_context_for_question(question: str, max_listings: int = 30) -> st
             else:
                 lines.append(f"- id={lid} (not found in DB)")
 
-    # Kleiner Hint für das Modell, was der User vermutlich will
+    # Intent-Hints für das Modell
     q_lower = question.lower()
     intent_hints: List[str] = []
     if any(w in q_lower for w in ["rendite", "yield", "cap rate", "miete", "rental"]):
@@ -388,7 +388,6 @@ def ask_chat_model(question: str, context: str) -> str:
             "'openai' package is installed."
         )
 
-    # System-Prompt: Investor- / Analyst-Modus, klare Struktur, Rückfragen wenn Daten fehlen
     system_content = (
         "You are EstateAI, a real estate & finance analyst working with a snapshot of "
         "Rightmove listings stored in a database.\n\n"
@@ -419,10 +418,7 @@ def ask_chat_model(question: str, context: str) -> str:
     )
 
     messages = [
-        {
-            "role": "system",
-            "content": system_content,
-        },
+        {"role": "system", "content": system_content},
         {
             "role": "user",
             "content": (
@@ -600,8 +596,16 @@ def render_chat_tab():
             "Bitte den API Key in den Streamlit Secrets oder der .env-Datei hinterlegen."
         )
 
+    # Chat-History initialisieren
     if "chat_messages" not in st.session_state:
         st.session_state["chat_messages"] = []
+
+    # Chat zurücksetzen
+    reset_col, _ = st.columns([1, 5])
+    with reset_col:
+        if st.button("🧹 Chat zurücksetzen"):
+            st.session_state["chat_messages"] = []
+            st.rerun()
 
     # -------- Chatfenster mit Scroll --------
     messages_html = ""
@@ -610,61 +614,58 @@ def render_chat_tab():
         align = "flex-end" if msg["role"] == "user" else "flex-start"
         bg = "#1f2937" if msg["role"] == "user" else "#020617"
 
-        # Text escapen, damit HTML nicht kaputtgeht
         safe_content = html.escape(msg["content"])
 
+        # WICHTIG: keine führenden Leerzeichen, sonst macht Markdown einen Codeblock
         messages_html += f"""
-        <div style="display:flex; justify-content:{align}; margin-bottom:0.35rem;">
-          <div style="max-width:80%;">
-            <div style="font-size:0.7rem; opacity:0.7; margin-bottom:0.15rem;">
-              {role_label}
-            </div>
-            <div style="
-                background:{bg};
-                padding:0.5rem 0.75rem;
-                border-radius:0.75rem;
-                white-space:pre-wrap;
-                font-size:0.9rem;
-                line-height:1.3;
-            ">
-              {safe_content}
-            </div>
-          </div>
-        </div>
-        """
+<div style="display:flex; justify-content:{align}; margin-bottom:0.35rem;">
+  <div style="max-width:80%;">
+    <div style="font-size:0.7rem; opacity:0.7; margin-bottom:0.15rem;">
+      {role_label}
+    </div>
+    <div style="
+        background:{bg};
+        padding:0.5rem 0.75rem;
+        border-radius:0.75rem;
+        white-space:pre-wrap;
+        font-size:0.9rem;
+        line-height:1.3;
+    ">
+      {safe_content}
+    </div>
+  </div>
+</div>
+"""
 
     st.markdown(
         f"""
-        <div style="
-            height: 420px;
-            overflow-y: auto;
-            border-radius: 0.75rem;
-            border: 1px solid #334155;
-            padding: 0.75rem;
-            background-color: #020617;
-            margin-bottom: 0.5rem;
-        ">
-            {messages_html}
-        </div>
-        """,
+<div style="
+    height: 420px;
+    overflow-y: auto;
+    border-radius: 0.75rem;
+    border: 1px solid #334155;
+    padding: 0.75rem;
+    background-color: #020617;
+    margin-bottom: 0.5rem;
+">
+    {messages_html}
+</div>
+""",
         unsafe_allow_html=True,
     )
 
-    # -------- Eingabefeld (fix unten wie bei ChatGPT) --------
+    # -------- Eingabefeld --------
     prompt = st.chat_input("Ask a question about these listings…")
 
     if prompt:
-        # User-Message speichern
         st.session_state["chat_messages"].append({"role": "user", "content": prompt})
 
-        # Antwort generieren
         with st.spinner("Analyzing the current portfolio and database context…"):
             context = build_chat_context_for_question(prompt)
             answer = ask_chat_model(prompt, context)
 
         st.session_state["chat_messages"].append({"role": "assistant", "content": answer})
 
-        # Seite neu rendern, damit das Chatfenster mit neuem Inhalt angezeigt wird
         st.rerun()
 
 
