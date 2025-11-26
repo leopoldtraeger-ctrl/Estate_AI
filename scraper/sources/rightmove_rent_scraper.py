@@ -47,7 +47,7 @@ async def fetch_rent_links(
         logger(f"📄 Loading RENT listing page: {url}")
         try:
             await page.goto(url, timeout=70000, wait_until="domcontentloaded")
-        except TimeoutError as e:
+        except PlaywrightTimeoutError as e:
             logger(f"❌ Timeout loading rent listing page {url}: {e}")
             continue
 
@@ -66,7 +66,7 @@ async def fetch_rent_links(
     await pw.stop()
 
     # dedupe
-    return list(set(links))
+    return list(dict.fromkeys(links))
 
 
 # ----------------------------------------------------------
@@ -89,7 +89,7 @@ async def scrape_rent_property(
     logger(f"🏠 [RENT] Scraping: {url}")
     try:
         await page.goto(url, timeout=70000, wait_until="domcontentloaded")
-    except TimeoutError as e:
+    except PlaywrightTimeoutError as e:
         logger(f"❌ Timeout loading rent property page {url}: {e}")
         await browser.close()
         await pw.stop()
@@ -163,8 +163,7 @@ async def scrape_rent_property(
     return {
         "url": url,
         "title": title,
-        # HIER: price = Miete (meist PCM). Wir lassen den Key 'price'
-        # damit ingest_bulk_results weiterverwendet werden kann.
+        # price = Miete (meist PCM), Key bleibt 'price' für ingest_bulk_results
         "price": price,
         "address": address,
         "description": description,
@@ -230,4 +229,3 @@ def scrape_all_rentals_sync(
     logger: Optional[Logger] = None,
 ) -> List[Dict[str, Any]]:
     return asyncio.run(scrape_all_rentals(location, pages, logger=logger))
-

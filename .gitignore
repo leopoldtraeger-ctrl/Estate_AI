@@ -3,3 +3,5 @@ venv/
 __pycache__/
 *.pyc
 .playwright/
+.DS_Store
+**/.DS_Store

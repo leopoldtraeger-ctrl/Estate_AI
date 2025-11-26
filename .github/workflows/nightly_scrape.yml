@@ -28,15 +28,22 @@ jobs:
           python -m playwright install --with-deps chromium
 
       - name: Run nightly scraper (SALE + RENT)
+        env:
+          ESTATEAI_SCRAPE_LOCATION: "London"
+          ESTATEAI_SALE_PAGES: "3"
+          ESTATEAI_RENT_PAGES: "3"
         run: |
           python nightly_scrape.py
 
       - name: Commit updated estateai.db (if changed)
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           git config user.name "estateai-bot"
           git config user.email "estateai-bot@users.noreply.github.com"
 
-          if git status --porcelain estateai.db | grep -q "M estateai.db"; then
+          # Hat sich estateai.db in irgendeiner Form geändert?
+          if git status --porcelain | grep -q "estateai.db"; then
             echo "estateai.db changed – committing…"
             git add estateai.db
             git commit -m "Nightly scrape update"

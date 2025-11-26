@@ -1,20 +1,22 @@
-# scripts/nightly_scrape.py
-
 """
 Nightly scraper for EstateAI.
 
 - Scrapes SALE & RENT listings from Rightmove
 - Writes everything into estateai.db via ingest_bulk_results
+- Designed to be run from GitHub Actions as well as locally.
 """
+
+import os
 
 from database.connection import get_session
 from database.models import Base
 from database.seed_benchmarks import seed_all_benchmarks
 from database.ingest import ingest_bulk_results
-from scraper.sources.rightmove_scraper import (
-    scrape_all_sync,
-    scrape_all_rentals_sync,
-)
+
+# SALE: Haupt-Scraper
+from scraper.sources.rightmove_scraper import scrape_all_sync
+# RENT: eigener Rent-Scraper
+from scraper.sources.rightmove_rent_scraper import scrape_all_rentals_sync
 
 
 def ensure_db_initialized() -> None:
@@ -23,20 +25,35 @@ def ensure_db_initialized() -> None:
     """
     with get_session() as session:
         bind = session.get_bind()
+        print(f"[DB] Using database URL: {bind.url}")
         Base.metadata.create_all(bind=bind)
-        # idempotent: nur wenn leer
+        # idempotent: seed nur, wenn Tabellen leer sind
         seed_all_benchmarks(session)
 
 
-def run_nightly_scrape(
-    location: str = "London",
-    sale_pages: int = 20,
-    rent_pages: int = 20,
-) -> None:
+def run_nightly_scrape() -> None:
     """
     Main entrypoint for the nightly job.
-    Increase sale_pages / rent_pages wenn du mehr Daten willst.
+
+    Steuerbar über Env-Variablen (praktisch für GitHub Actions):
+
+    - ESTATEAI_SCRAPE_LOCATION (default: "London")
+    - ESTATEAI_SALE_PAGES     (default: "1")
+    - ESTATEAI_RENT_PAGES     (default: "1")
     """
+
+    location = os.getenv("ESTATEAI_SCRAPE_LOCATION", "London")
+    sale_pages = int(os.getenv("ESTATEAI_SALE_PAGES", "1"))
+    rent_pages = int(os.getenv("ESTATEAI_RENT_PAGES", "1"))
+
+    print("========================================")
+    print(" EstateAI Nightly Rightmove Scrape")
+    print("========================================")
+    print(f"Location:     {location}")
+    print(f"SALE pages:   {sale_pages}")
+    print(f"RENT pages:   {rent_pages}")
+    print("========================================")
+
     ensure_db_initialized()
 
     # -------- SALE --------
@@ -64,6 +81,8 @@ def run_nightly_scrape(
         listing_type="rent",
     )
     print(f"RENT ingest result: total={total_r}, success={success_r}, error={error_r}")
+
+    print("✅ Nightly scrape finished.")
 
 
 if __name__ == "__main__":
