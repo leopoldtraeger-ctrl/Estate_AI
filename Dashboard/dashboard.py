@@ -1,7 +1,10 @@
+# Dashboard/dashboard.py
+
 import os
 import sys
 import math
 import re
+import statistics
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 
@@ -29,7 +32,7 @@ from database import models
 from database.models import Base  # für DB-Init
 from database.ingest import ingest_bulk_results
 from scraper.sources.rightmove_scraper import scrape_all_sync
-# 🆕 Benchmarks-Seed
+# Benchmarks-Seed
 from database.seed_benchmarks import seed_all_benchmarks
 
 # =========================
@@ -78,15 +81,13 @@ def ensure_db_initialized() -> None:
         with get_session() as session:
             bind = session.get_bind()
             Base.metadata.create_all(bind=bind)
-
-            # 🆕 Benchmarks nur einmalig befüllen
             seed_all_benchmarks(session)
     except Exception as e:
         print("DB init failed (ignored):", e)
 
 
 # =========================
-# Helper: DB-Access
+# Helper: DB-Access (Core KPIs)
 # =========================
 
 def load_summary() -> Dict[str, Any]:
@@ -130,6 +131,130 @@ def load_distinct_property_types() -> List[str]:
     return types
 
 
+def _basic_distribution(values: List[float]) -> Dict[str, Any]:
+    if not values:
+        return {
+            "count": 0,
+            "min": None,
+            "max": None,
+            "avg": None,
+            "median": None,
+        }
+    cleaned = [float(v) for v in values if v is not None and not math.isnan(float(v))]
+    if not cleaned:
+        return {
+            "count": 0,
+            "min": None,
+            "max": None,
+            "avg": None,
+            "median": None,
+        }
+    cleaned.sort()
+    return {
+        "count": len(cleaned),
+        "min": min(cleaned),
+        "max": max(cleaned),
+        "avg": sum(cleaned) / len(cleaned),
+        "median": statistics.median(cleaned),
+    }
+
+
+def load_price_distribution(
+    listing_type: Optional[str] = None,
+    per_sqm: bool = False,
+) -> Dict[str, Any]:
+    """
+    Liefert Verteilung für Preise (oder Preis/m²) für SALE bzw. RENT.
+    """
+    with get_session() as session:
+        stmt = (
+            select(
+                models.Listing.price,
+                models.Property.floor_area_sqm,
+            )
+            .join(models.Property, models.Property.id == models.Listing.property_id)
+        )
+        if listing_type:
+            stmt = stmt.where(models.Listing.listing_type == listing_type)
+
+        rows = session.execute(stmt).all()
+
+    values: List[float] = []
+    for price, sqm in rows:
+        if price is None or price <= 0:
+            continue
+        if per_sqm:
+            if sqm is None or sqm <= 0:
+                continue
+            values.append(float(price) / float(sqm))
+        else:
+            values.append(float(price))
+
+    return _basic_distribution(values)
+
+
+def load_rent_area_stats() -> Dict[str, Any]:
+    """
+    Stats für Miet-Listings mit Wohnfläche:
+    - Anzahl
+    - Ø Wohnfläche
+    - Ø Miete (PCM)
+    - Ø Miete pro m² (PCM)
+    """
+    with get_session() as session:
+        stmt = (
+            select(
+                models.Listing.price,
+                models.Property.floor_area_sqm,
+            )
+            .join(models.Property, models.Property.id == models.Listing.property_id)
+            .where(
+                models.Listing.listing_type == "rent",
+                models.Listing.price.isnot(None),
+                models.Listing.price > 0,
+                models.Property.floor_area_sqm.isnot(None),
+                models.Property.floor_area_sqm > 0,
+            )
+        )
+        rows = session.execute(stmt).all()
+
+    if not rows:
+        return {
+            "count": 0,
+            "avg_sqm": None,
+            "avg_rent_pcm": None,
+            "avg_rent_per_sqm_pcm": None,
+        }
+
+    prices = [float(r[0]) for r in rows]
+    areas = [float(r[1]) for r in rows if r[1] is not None and r[1] > 0]
+
+    count = min(len(prices), len(areas))
+    if count == 0:
+        return {
+            "count": 0,
+            "avg_sqm": None,
+            "avg_rent_pcm": None,
+            "avg_rent_per_sqm_pcm": None,
+        }
+
+    prices = prices[:count]
+    areas = areas[:count]
+
+    psqm_list = [p / a for p, a in zip(prices, areas) if a > 0]
+
+    return {
+        "count": count,
+        "avg_sqm": sum(areas) / len(areas),
+        "avg_rent_pcm": sum(prices) / len(prices),
+        "avg_rent_per_sqm_pcm": sum(psqm_list) / len(psqm_list) if psqm_list else None,
+    }
+
+
+# =========================
+# Helper: DB-Access (Listings)
+# =========================
+
 def load_listings(
     min_price: Optional[float] = None,
     max_price: Optional[float] = None,
@@ -139,11 +264,9 @@ def load_listings(
     limit: int = 200,
 ) -> List[Dict[str, Any]]:
     """
-    Holt Listings aus der DB inkl. Filter:
-    - Preis
-    - Bedrooms
-    - Property Type
-    - Listing Type (sale / rent)
+    Holt Listings aus der DB inkl. Filter.
+    Zusätzlich werden Property-Felder (m², Baujahr, EPC, City) gemappt,
+    damit der KI-Agent mehr Kontext hat.
     """
     with get_session() as session:
         stmt = (
@@ -157,7 +280,12 @@ def load_listings(
                 models.Listing.property_type,
                 models.Listing.listing_type,
                 models.Listing.description,
+                models.Property.floor_area_sqm,
+                models.Property.year_built,
+                models.Property.energy_rating,
+                models.Property.city,
             )
+            .join(models.Property, models.Property.id == models.Listing.property_id)
             .order_by(models.Listing.price.desc())
             .limit(limit)
         )
@@ -180,6 +308,14 @@ def load_listings(
         desc = (r.description or "").replace("\n", " ")
         short_desc = (desc[:200] + "...") if len(desc) > 200 else desc
 
+        floor_area = r.floor_area_sqm
+        price_per_sqm = None
+        if floor_area and r.price:
+            try:
+                price_per_sqm = float(r.price) / float(floor_area)
+            except Exception:
+                price_per_sqm = None
+
         data.append(
             {
                 "id": r.id,
@@ -192,6 +328,11 @@ def load_listings(
                 "listing_type": r.listing_type,
                 "description": short_desc,
                 "description_full": desc,
+                "floor_area_sqm": floor_area,
+                "price_per_sqm": price_per_sqm,
+                "year_built": r.year_built,
+                "energy_rating": r.energy_rating,
+                "city": r.city,
             }
         )
     return data
@@ -199,19 +340,28 @@ def load_listings(
 
 def load_listing_by_id(listing_id: int) -> Optional[Dict[str, Any]]:
     """
-    Holt ein einzelnes Listing nach ID aus der DB.
+    Holt ein einzelnes Listing nach ID aus der DB inkl. Property-Feldern.
     """
     with get_session() as session:
-        stmt = select(
-            models.Listing.id,
-            models.Listing.property_id,
-            models.Listing.url,
-            models.Listing.price,
-            models.Listing.bedrooms,
-            models.Listing.bathrooms,
-            models.Listing.property_type,
-            models.Listing.description,
-        ).where(models.Listing.id == listing_id)
+        stmt = (
+            select(
+                models.Listing.id,
+                models.Listing.property_id,
+                models.Listing.url,
+                models.Listing.price,
+                models.Listing.bedrooms,
+                models.Listing.bathrooms,
+                models.Listing.property_type,
+                models.Listing.listing_type,
+                models.Listing.description,
+                models.Property.floor_area_sqm,
+                models.Property.year_built,
+                models.Property.energy_rating,
+                models.Property.city,
+            )
+            .join(models.Property, models.Property.id == models.Listing.property_id)
+            .where(models.Listing.id == listing_id)
+        )
 
         row = session.execute(stmt).one_or_none()
 
@@ -221,6 +371,14 @@ def load_listing_by_id(listing_id: int) -> Optional[Dict[str, Any]]:
     desc = (row.description or "").replace("\n", " ")
     short_desc = (desc[:200] + "...") if len(desc) > 200 else desc
 
+    floor_area = row.floor_area_sqm
+    price_per_sqm = None
+    if floor_area and row.price:
+        try:
+            price_per_sqm = float(row.price) / float(floor_area)
+        except Exception:
+            price_per_sqm = None
+
     return {
         "id": row.id,
         "property_id": row.property_id,
@@ -229,8 +387,14 @@ def load_listing_by_id(listing_id: int) -> Optional[Dict[str, Any]]:
         "bedrooms": row.bedrooms,
         "bathrooms": row.bathrooms,
         "type": row.property_type,
+        "listing_type": row.listing_type,
         "description": short_desc,
         "description_full": desc,
+        "floor_area_sqm": floor_area,
+        "price_per_sqm": price_per_sqm,
+        "year_built": row.year_built,
+        "energy_rating": row.energy_rating,
+        "city": row.city,
     }
 
 
@@ -252,6 +416,39 @@ def extract_property_ids_from_question(question: str) -> List[int]:
 
     # Dedupe, Reihenfolge behalten
     return list(dict.fromkeys(ids))
+
+
+def detect_question_intent(question: str) -> Dict[str, Any]:
+    """
+    Sehr einfache regelbasierte Intent-Erkennung.
+    Liefert Hinweise für den Prompt (Portfolio vs. Listing, m², Rendite etc.).
+    """
+    q = question.lower()
+
+    intent: Dict[str, Any] = {
+        "focus": "portfolio",      # oder "listing"
+        "mode": "generic",         # "rent_psqm", "sale_psqm", "yield", "compare_price"
+        "listing_ids": extract_property_ids_from_question(question),
+    }
+
+    if intent["listing_ids"]:
+        intent["focus"] = "listing"
+
+    # m² / Quadratmeter
+    sqm_words = ["m²", "sqm", "square meter", "square metre", "quadratmeter", "quadratmeterpreis", "psqm"]
+    rent_words = ["miete", "rent", "rental", "pcm"]
+    sale_words = ["kauf", "kaufpreis", "purchase", "buy", "verkauf", "price"]
+
+    if any(w in q for w in sqm_words) and any(w in q for w in rent_words):
+        intent["mode"] = "rent_psqm"
+    elif any(w in q for w in sqm_words) and any(w in q for w in sale_words):
+        intent["mode"] = "sale_psqm"
+    elif any(w in q for w in ["rendite", "yield", "cap rate", "return on investment", "roi"]):
+        intent["mode"] = "yield"
+    elif any(w in q for w in ["teuer", "billig", "expensive", "cheap", "overpriced", "underpriced", "fair price"]):
+        intent["mode"] = "compare_price"
+
+    return intent
 
 
 # =========================
@@ -354,13 +551,22 @@ def build_chat_context(max_listings: int = 30) -> str:
     """
     Baut einen kompakten Text-Kontext aus der Datenbank:
     - Aggregierte Kennzahlen
-    - Einige Beispiel-Listings
+    - Preisverteilungen
+    - Miet-/m²-Stats
+    - Beispiel-Listings inkl. m², Preis/m², EPC, Baujahr, City
     """
     summary = load_summary()
     listings = load_listings(limit=max_listings)
 
+    sale_price = load_price_distribution("sale", per_sqm=False)
+    rent_price = load_price_distribution("rent", per_sqm=False)
+    sale_psqm = load_price_distribution("sale", per_sqm=True)
+    rent_psqm = load_price_distribution("rent", per_sqm=True)
+    rent_area = load_rent_area_stats()
+
     lines: List[str] = []
 
+    # High-Level
     lines.append(
         "High-level database summary:\n"
         f"- Total listings in DB: {summary['total_listings']}\n"
@@ -370,16 +576,73 @@ def build_chat_context(max_listings: int = 30) -> str:
         f"- Average SALE price: £{summary['avg_price_sale']:,.0f}\n"
     )
 
+    # Preisverteilungen
+    if sale_price["count"] > 0:
+        lines.append(
+            "\nSALE price distribution (GBP):\n"
+            f"- Count: {sale_price['count']}\n"
+            f"- Min:   £{sale_price['min']:,.0f}\n"
+            f"- Median: £{sale_price['median']:,.0f}\n"
+            f"- Max:   £{sale_price['max']:,.0f}\n"
+        )
+    if rent_price["count"] > 0:
+        lines.append(
+            "\nRENT price distribution (PCM, GBP):\n"
+            f"- Count: {rent_price['count']}\n"
+            f"- Min:   £{rent_price['min']:,.0f}\n"
+            f"- Median: £{rent_price['median']:,.0f}\n"
+            f"- Max:   £{rent_price['max']:,.0f}\n"
+        )
+
+    if sale_psqm["count"] > 0:
+        lines.append(
+            "\nSALE price per sqm distribution (GBP / sqm):\n"
+            f"- Count: {sale_psqm['count']}\n"
+            f"- Min:   £{sale_psqm['min']:,.0f}\n"
+            f"- Median: £{sale_psqm['median']:,.0f}\n"
+            f"- Max:   £{sale_psqm['max']:,.0f}\n"
+        )
+    if rent_psqm["count"] > 0:
+        lines.append(
+            "\nRENT price per sqm distribution (PCM, GBP / sqm):\n"
+            f"- Count: {rent_psqm['count']}\n"
+            f"- Min:   £{rent_psqm['min']:,.2f}\n"
+            f"- Median: £{rent_psqm['median']:,.2f}\n"
+            f"- Max:   £{rent_psqm['max']:,.2f}\n"
+        )
+
+    if rent_area["count"] > 0 and rent_area["avg_rent_per_sqm_pcm"] is not None:
+        lines.append(
+            "\nPortfolio-level rent/area stats (only listings with known floor area):\n"
+            f"- Listings with area: {rent_area['count']}\n"
+            f"- Avg floor area: {rent_area['avg_sqm']:.1f} sqm\n"
+            f"- Avg rent (PCM): £{rent_area['avg_rent_pcm']:,.0f}\n"
+            f"- Avg rent per sqm (PCM): £{rent_area['avg_rent_per_sqm_pcm']:,.2f}\n"
+        )
+
     if not listings:
         lines.append("\nNo individual listings available yet.")
         return "\n".join(lines)
 
-    lines.append("\nSample listings (id, price, bedrooms, bathrooms, type, listing_type):")
+    # Beispiel-Listings
+    lines.append(
+        "\nSample listings "
+        "(id, listing_type, price, bedrooms, bathrooms, floor_sqm, price_per_sqm, city, energy_rating, year_built):"
+    )
     for l in listings[:max_listings]:
+        price = l["price"]
+        price_str = f"£{price:,.0f}" if price is not None and not math.isnan(price) else "n/a"
+        sqm = f"{l['floor_area_sqm']:.1f}" if l.get("floor_area_sqm") else "n/a"
+        p_sqm = f"£{l['price_per_sqm']:,.0f}" if l.get("price_per_sqm") else "n/a"
+        city = l.get("city") or "n/a"
+        epc = l.get("energy_rating") or "n/a"
+        year = l.get("year_built") or "n/a"
+
         lines.append(
-            f"- id={l['id']}, price={l['price']}, "
-            f"bedrooms={l['bedrooms']}, bathrooms={l['bathrooms']}, "
-            f"type={l['type']}, listing_type={l['listing_type']}"
+            f"- id={l['id']}, type={l['type']}, listing_type={l['listing_type']}, "
+            f"price={price_str}, bedrooms={l['bedrooms']}, bathrooms={l['bathrooms']}, "
+            f"floor_sqm={sqm}, price_per_sqm={p_sqm}, city={city}, "
+            f"energy_rating={epc}, year_built={year}"
         )
 
     return "\n".join(lines)
@@ -388,12 +651,14 @@ def build_chat_context(max_listings: int = 30) -> str:
 def build_chat_context_for_question(question: str, max_listings: int = 30) -> str:
     """
     Kombiniert:
-    - globale DB-Summary
+    - globale DB-Summary + Verteilungen
     - Sample-Listings
     - explizite Details zu Listings, die in der Frage erwähnt wurden
+    - Intent-Hints (Rendite, m², teuer/billig etc.)
     """
     base_context = build_chat_context(max_listings=max_listings)
-    focus_ids = extract_property_ids_from_question(question)
+    intent = detect_question_intent(question)
+    focus_ids = intent.get("listing_ids", [])
 
     lines = [base_context]
 
@@ -404,11 +669,26 @@ def build_chat_context_for_question(question: str, max_listings: int = 30) -> st
             if listing:
                 price = listing["price"]
                 price_str = f"£{price:,.0f}" if price is not None and not math.isnan(price) else "n/a"
+                sqm = (
+                    f"{listing['floor_area_sqm']:.1f}"
+                    if listing.get("floor_area_sqm")
+                    else "n/a"
+                )
+                p_sqm = (
+                    f"£{listing['price_per_sqm']:,.0f}"
+                    if listing.get("price_per_sqm")
+                    else "n/a"
+                )
+                city = listing.get("city") or "n/a"
+                epc = listing.get("energy_rating") or "n/a"
+                year = listing.get("year_built") or "n/a"
 
                 lines.append(
                     f"- id={listing['id']}, price={price_str}, "
                     f"bedrooms={listing['bedrooms']}, bathrooms={listing['bathrooms']}, "
-                    f"type={listing['type']}, url={listing['url']}"
+                    f"type={listing['type']}, listing_type={listing['listing_type']}, "
+                    f"floor_sqm={sqm}, price_per_sqm={p_sqm}, city={city}, "
+                    f"energy_rating={epc}, year_built={year}, url={listing['url']}"
                 )
             else:
                 lines.append(f"- id={lid} (not found in DB)")
@@ -416,15 +696,40 @@ def build_chat_context_for_question(question: str, max_listings: int = 30) -> st
     # Intent-Hints für das Modell
     q_lower = question.lower()
     intent_hints: List[str] = []
-    if any(w in q_lower for w in ["rendite", "yield", "cap rate", "miete", "rental"]):
+
+    if intent["mode"] == "rent_psqm":
         intent_hints.append(
-            "- The user is asking about rental yield / cap rate or income-based valuation. "
-            "You should compute yields where possible and show the formula."
+            "- The user is asking about rent per square metre (PCM). "
+            "Use the rent-per-sqm statistics from the context where available. "
+            "If only rent and area are known for individual listings, compute "
+            "rent_per_sqm = rent_pcm / floor_area_sqm explicitly."
         )
-    if any(w in q_lower for w in ["teuer", "billig", "expensive", "cheap", "overpriced", "underpriced"]):
+    elif intent["mode"] == "sale_psqm":
         intent_hints.append(
-            "- The user is asking whether a listing is expensive or cheap compared to the rest of the database. "
-            "Compare the price level (and price per bedroom if useful) to averages in the context."
+            "- The user is asking about purchase price per square metre. "
+            "Use price_per_sqm where available and show at least an average value. "
+            "Formula: price_per_sqm = purchase_price / floor_area_sqm."
+        )
+    elif intent["mode"] == "yield":
+        intent_hints.append(
+            "- The user is asking about rental yield / ROI. "
+            "Use yields based on purchase price and annual net rent. "
+            "Formula: yield = annual_net_rent / purchase_price. "
+            "If important inputs (price, rent, opex, holding period) are missing, "
+            "ask up to two focused follow-up questions before calculating."
+        )
+    elif intent["mode"] == "compare_price":
+        intent_hints.append(
+            "- The user is asking whether a listing or group of listings is expensive or cheap. "
+            "Compare the price (and price per sqm where available) to the distributions "
+            "in the context (min / median / max). Talk in relative terms (+/- %, "
+            "above/below median) instead of vague statements."
+        )
+
+    if any(w in q_lower for w in ["tabelle", "table", "übersicht", "matrix"]):
+        intent_hints.append(
+            "- Present the key numbers in a compact Markdown table (max ~10 rows) "
+            "in addition to your explanation."
         )
 
     if intent_hints:
@@ -434,45 +739,59 @@ def build_chat_context_for_question(question: str, max_listings: int = 30) -> st
     return "\n".join(lines)
 
 
-def ask_chat_model(question: str, context: str) -> str:
+def ask_chat_model(
+    question: str,
+    context: str,
+    stream_placeholder: Optional[st.delta_generator.DeltaGenerator] = None,
+) -> str:
     """
-    Fragt das OpenAI-Modell. Falls kein Client vorhanden ist,
-    gib eine freundliche Fehlermeldung zurück.
+    Fragt das OpenAI-Modell.
+    - Nutzt einen starken System-Prompt für Real-Estate-Analysen.
+    - Kann optional token-weise in ein Streamlit-Placeholder streamen.
     """
     if openai_client is None:
-        return (
+        msg = (
             "The AI assistant is not configured yet (missing OpenAI client or API key).\n"
             "Please set OPENAI_API_KEY (e.g. in Streamlit Secrets) and make sure the "
             "'openai' package is installed."
         )
+        if stream_placeholder is not None:
+            stream_placeholder.markdown(msg)
+        return msg
 
     system_content = (
-        "You are EstateAI, a real estate & finance analyst working with a snapshot of "
-        "Rightmove listings stored in a database.\n\n"
+        "You are EstateAI, a senior real estate & construction investment analyst. "
+        "You see a snapshot of Rightmove listings stored in a structured database.\n\n"
+        "DATA YOU SEE IN THE CONTEXT:\n"
+        "- Portfolio-level stats (counts, min/median/max prices, averages).\n"
+        "- Distributions for SALE and RENT prices and price-per-sqm where available.\n"
+        "- Sample listings with: id, listing_type, price, bedrooms, bathrooms, floor_area_sqm, "
+        "  price_per_sqm, city, energy_rating, year_built, URL.\n\n"
         "CRITICAL RULES:\n"
-        "1) You may ONLY use numeric facts that appear in the provided database context. "
-        "   Never invent concrete prices, rents, yields, or addresses.\n"
-        "2) If important numeric inputs are missing (e.g. purchase price, expected rent, "
-        "   specific listing ID, number of bedrooms), do NOT guess. Instead:\n"
+        "1) For database-based numbers (portfolio stats, listing prices, rents, m² etc.) "
+        "   only use numeric values that explicitly appear in the provided context. "
+        "   Never invent concrete prices, rents, yields, or addresses that are not present.\n"
+        "2) For purely hypothetical investment questions where the user gives all numbers "
+        "   (purchase price, rent, opex, growth, holding period, etc.), you MAY compute "
+        "   yields and cash flows based on those user-provided numbers even if they are "
+        "   not in the database context.\n"
+        "3) If important numeric inputs are missing (e.g. purchase price, expected rent, "
+        "   opex, holding period, target yield), do NOT guess. Instead:\n"
         "   - Explain briefly which data is missing.\n"
         "   - Ask up to TWO very concrete follow-up questions to get that data.\n"
-        "   - Do NOT output fake numbers just to give a complete answer.\n"
-        "3) Answer in the same language as the user's question (German or English).\n\n"
+        "   - Only then perform calculations.\n"
+        "4) Answer in the same language as the user's question (German or English).\n\n"
         "OUTPUT STRUCTURE (unless the user explicitly asks for a different format):\n"
-        "1. Short answer (1–3 sentences).\n"
-        "2. Key numbers (bullet points with concrete figures from the context; include formulas "
-        "   if you compute yields or ratios).\n"
-        "3. Interpretation & investor view (how attractive is this, what is upside/downside, "
-        "   how does it compare to other listings in the context).\n\n"
-        "YIELD / RENTAL QUESTIONS:\n"
-        "- When the user mentions a target yield (e.g. 4.5%), compute the implied annual and "
-        "  monthly rent if the purchase price is known.\n"
-        "- Clearly show the formula you use.\n"
-        "- Compare the result qualitatively to the rest of the portfolio where possible.\n\n"
-        "COMPARISON QUESTIONS (e.g. 'Is this expensive?'):\n"
-        "- Compare the listing's price to averages in the context (overall and for similar "
-        "  bedroom counts if possible).\n"
-        "- Talk in relative terms (+/- %, above/below average) when the context allows it.\n"
+        "1. Short answer (1–3 sentences) summarising the result.\n"
+        "2. Key numbers\n"
+        "   - Bullet points OR a compact Markdown table (max ~10 rows).\n"
+        "   - Always show formulas for yields, price-per-sqm and other ratios you compute.\n"
+        "3. Interpretation & investor view\n"
+        "   - How attractive is this (risk/return, upside/downside)?\n"
+        "   - How does it compare to the rest of the portfolio (median, min/max, psqm)?\n\n"
+        "TABLES:\n"
+        "- You may output Markdown tables. They will be rendered nicely in the UI.\n"
+        "- Prefer small, focused tables over raw dumps of all listings.\n"
     )
 
     messages = [
@@ -486,12 +805,29 @@ def ask_chat_model(question: str, context: str) -> str:
         },
     ]
 
-    completion = openai_client.chat.completions.create(
+    # Streaming für „typing effect“
+    if stream_placeholder is None:
+        completion = openai_client.chat.completions.create(
+            model="gpt-4.1-mini",
+            temperature=0.15,
+            messages=messages,
+        )
+        return completion.choices[0].message.content.strip()
+
+    full_answer = ""
+    stream = openai_client.chat.completions.create(
         model="gpt-4.1-mini",
         temperature=0.15,
         messages=messages,
+        stream=True,
     )
-    return completion.choices[0].message.content.strip()
+    for chunk in stream:
+        delta = chunk.choices[0].delta.content or ""
+        if delta:
+            full_answer += delta
+            stream_placeholder.markdown(full_answer)
+
+    return full_answer.strip()
 
 
 # =========================
@@ -555,6 +891,11 @@ def render_listings_tab():
                 "Bedrooms": l["bedrooms"],
                 "Bathrooms": l["bathrooms"],
                 "Type": l["type"],
+                "Floor Area (sqm)": l.get("floor_area_sqm"),
+                "Price per sqm (GBP)": l.get("price_per_sqm"),
+                "City": l.get("city"),
+                "EPC": l.get("energy_rating"),
+                "Year Built": l.get("year_built"),
                 "URL": l["url"],
                 "Description": l["description"],
             }
@@ -585,6 +926,16 @@ def render_listings_tab():
             st.write(f"**Bathrooms:** {selected['bathrooms']}")
             st.write(f"**Type:** {selected['type']}")
             st.write(f"**Property ID:** {selected['property_id']}")
+            if selected.get("floor_area_sqm"):
+                st.write(f"**Floor Area:** {selected['floor_area_sqm']:.1f} sqm")
+            if selected.get("price_per_sqm"):
+                st.write(f"**Price per sqm:** £{selected['price_per_sqm']:,.0f}")
+            if selected.get("city"):
+                st.write(f"**City:** {selected['city']}")
+            if selected.get("energy_rating"):
+                st.write(f"**Energy Rating (EPC):** {selected['energy_rating']}")
+            if selected.get("year_built"):
+                st.write(f"**Year Built:** {selected['year_built']}")
 
         with col_right:
             # Bilder – einfacher "Carousel"-Viewer mit Pfeilen
@@ -728,11 +1079,12 @@ def render_chat_tab():
     st.subheader("💬 EstateAI – AI Assistant")
 
     st.markdown(
-        "Stell Fragen zu den aktuell in der Datenbank gespeicherten Immobilien.\n\n"
-        "- Beispiele: *„Wie ist die durchschnittliche Anzahl Zimmer?“*, "
-        "*„Wie verteilen sich die Preise?“*, "
+        "Stell Fragen zu den aktuell in der Datenbank gespeicherten Immobilien oder zu "
+        "spezifischen Investment-Szenarien.\n\n"
+        "- Beispiele: *„Wie ist die durchschnittliche Miete pro m² in London?“*, "
         "*„Ist Listing 5 im Vergleich zu den anderen teuer?“*, "
-        "*„Wie hoch wäre die Brutto-Mietrendite bei 4,5 % Rendite-Annahme?“*"
+        "*„Wie hoch wäre die Brutto-Mietrendite bei Kaufpreis 500.000 £ und Miete 2.000 £ pcm?“*, "
+        "*„Erstelle mir eine kleine Tabelle mit den wichtigsten Kennzahlen für die teuersten Listings.“*"
     )
 
     # Warnung, falls keine Listings vorhanden
@@ -809,15 +1161,19 @@ def render_chat_tab():
     )
 
     # -------- Eingabefeld --------
-    prompt = st.chat_input("Ask a question about these listings…")
+    prompt = st.chat_input("Ask a question about these listings or an investment scenario…")
 
     if prompt:
         st.session_state["chat_messages"].append({"role": "user", "content": prompt})
 
+        # Placeholder für Streaming-Antwort (typing effect)
+        assistant_placeholder = st.empty()
+
         with st.spinner("Analyzing the current portfolio and database context…"):
             context = build_chat_context_for_question(prompt)
-            answer = ask_chat_model(prompt, context)
+            answer = ask_chat_model(prompt, context, stream_placeholder=assistant_placeholder)
 
+        # finale Antwort in History speichern
         st.session_state["chat_messages"].append({"role": "assistant", "content": answer})
 
         st.rerun()
