@@ -38,13 +38,13 @@ def run_nightly_scrape() -> None:
     Steuerbar über Env-Variablen (praktisch für GitHub Actions):
 
     - ESTATEAI_SCRAPE_LOCATION (default: "London")
-    - ESTATEAI_SALE_PAGES     (default: "1")
-    - ESTATEAI_RENT_PAGES     (default: "1")
+    - ESTATEAI_SALE_PAGES     (default: "20")
+    - ESTATEAI_RENT_PAGES     (default: "20")
     """
 
     location = os.getenv("ESTATEAI_SCRAPE_LOCATION", "London")
-    sale_pages = int(os.getenv("ESTATEAI_SALE_PAGES", "1"))
-    rent_pages = int(os.getenv("ESTATEAI_RENT_PAGES", "1"))
+    sale_pages = int(os.getenv("ESTATEAI_SALE_PAGES", "20"))
+    rent_pages = int(os.getenv("ESTATEAI_RENT_PAGES", "20"))
 
     print("========================================")
     print(" EstateAI Nightly Rightmove Scrape")
