@@ -14,7 +14,6 @@ from dotenv import load_dotenv
 
 import requests
 from bs4 import BeautifulSoup
-import html
 
 # =========================
 # Projekt-Root & .env laden
@@ -739,59 +738,58 @@ def build_chat_context_for_question(question: str, max_listings: int = 30) -> st
     return "\n".join(lines)
 
 
-def ask_chat_model(
-    question: str,
-    context: str,
-    stream_placeholder: Optional[st.delta_generator.DeltaGenerator] = None,
-) -> str:
+# =========================
+# OpenAI Call
+# =========================
+
+def ask_chat_model(question: str, context: str) -> str:
     """
     Fragt das OpenAI-Modell.
-    - Nutzt einen starken System-Prompt für Real-Estate-Analysen.
-    - Kann optional token-weise in ein Streamlit-Placeholder streamen.
+    Deutlich stärkerer System-Prompt für professionelle Investor-Antworten.
     """
     if openai_client is None:
-        msg = (
+        return (
             "The AI assistant is not configured yet (missing OpenAI client or API key).\n"
             "Please set OPENAI_API_KEY (e.g. in Streamlit Secrets) and make sure the "
             "'openai' package is installed."
         )
-        if stream_placeholder is not None:
-            stream_placeholder.markdown(msg)
-        return msg
 
     system_content = (
         "You are EstateAI, a senior real estate & construction investment analyst. "
-        "You see a snapshot of Rightmove listings stored in a structured database.\n\n"
-        "DATA YOU SEE IN THE CONTEXT:\n"
-        "- Portfolio-level stats (counts, min/median/max prices, averages).\n"
-        "- Distributions for SALE and RENT prices and price-per-sqm where available.\n"
-        "- Sample listings with: id, listing_type, price, bedrooms, bathrooms, floor_area_sqm, "
-        "  price_per_sqm, city, energy_rating, year_built, URL.\n\n"
+        "You work with a snapshot of Rightmove listings stored in a structured database "
+        "and support professional investors.\n\n"
         "CRITICAL RULES:\n"
-        "1) For database-based numbers (portfolio stats, listing prices, rents, m² etc.) "
-        "   only use numeric values that explicitly appear in the provided context. "
-        "   Never invent concrete prices, rents, yields, or addresses that are not present.\n"
-        "2) For purely hypothetical investment questions where the user gives all numbers "
-        "   (purchase price, rent, opex, growth, holding period, etc.), you MAY compute "
-        "   yields and cash flows based on those user-provided numbers even if they are "
-        "   not in the database context.\n"
-        "3) If important numeric inputs are missing (e.g. purchase price, expected rent, "
-        "   opex, holding period, target yield), do NOT guess. Instead:\n"
+        "1) You may ONLY use numeric facts that appear in the provided database context. "
+        "   Never invent concrete prices, rents, yields, or addresses.\n"
+        "2) If important numeric inputs are missing (e.g. purchase price, expected rent, "
+        "   opex, holding period, specific listing ID), do NOT guess. Instead:\n"
         "   - Explain briefly which data is missing.\n"
         "   - Ask up to TWO very concrete follow-up questions to get that data.\n"
-        "   - Only then perform calculations.\n"
-        "4) Answer in the same language as the user's question (German or English).\n\n"
+        "   - Do NOT output fake numbers just to give a complete answer.\n"
+        "3) Answer in the same language as the user's question (German or English).\n\n"
+        "GLOBAL STYLE RULES:\n"
+        "- Always answer in **Markdown**.\n"
+        "- Use clear section headings like `## 1. Übersicht`, `## 2. Kennzahlen`, "
+        "  `## 3. Interpretation & Investor View`.\n"
+        "- Whenever you summarise numeric groups (e.g. by bedroom, listing_type, market), "
+        "  present a compact Markdown table with headers.\n"
+        "- Be detailed and analytical: aim for 4–8 kurze Abschnitte plus Bulletpoints, "
+        "  nicht nur einen Ein-Paragraph-Text.\n\n"
         "OUTPUT STRUCTURE (unless the user explicitly asks for a different format):\n"
-        "1. Short answer (1–3 sentences) summarising the result.\n"
-        "2. Key numbers\n"
-        "   - Bullet points OR a compact Markdown table (max ~10 rows).\n"
-        "   - Always show formulas for yields, price-per-sqm and other ratios you compute.\n"
-        "3. Interpretation & investor view\n"
-        "   - How attractive is this (risk/return, upside/downside)?\n"
-        "   - How does it compare to the rest of the portfolio (median, min/max, psqm)?\n\n"
-        "TABLES:\n"
-        "- You may output Markdown tables. They will be rendered nicely in the UI.\n"
-        "- Prefer small, focused tables over raw dumps of all listings.\n"
+        "1. **Kurzfassung / Executive Summary** (2–4 Sätze).\n"
+        "2. **Wichtige Kennzahlen** – Tabellen + Bulletpoints mit konkreten Zahlen aus dem Kontext; "
+        "   zeige Formeln, wenn du Renditen oder Quoten berechnest.\n"
+        "3. **Interpretation & Investor-Sicht** – Attraktivität, Risiko, Upside/Downside, "
+        "   Vergleich zum restlichen Portfolio.\n"
+        "4. **Next Steps / Fragen** – 2–3 sinnvolle weitere Analyseschritte oder Fragen an den Investor.\n\n"
+        "YIELD / RENTAL QUESTIONS:\n"
+        "- Wenn der Nutzer eine Zielrendite nennt (z.B. 4,5 %), berechne die notwendige "
+        "  Jahres- und Monatsmiete bei gegebenem Kaufpreis.\n"
+        "- Zeige die verwendete Formel klar:\n"
+        "  yield = annual_net_rent / purchase_price.\n\n"
+        "COMPARISON QUESTIONS (e.g. 'Ist das teuer?'):\n"
+        "- Vergleiche den Preis und Preis/m² mit den Verteilungen im Kontext (Median, Min, Max).\n"
+        "- Sprich in relativen Begriffen (z.B. +20 % über Median), nicht nur qualitativ.\n"
     )
 
     messages = [
@@ -805,29 +803,12 @@ def ask_chat_model(
         },
     ]
 
-    # Streaming für „typing effect“
-    if stream_placeholder is None:
-        completion = openai_client.chat.completions.create(
-            model="gpt-4.1-mini",
-            temperature=0.15,
-            messages=messages,
-        )
-        return completion.choices[0].message.content.strip()
-
-    full_answer = ""
-    stream = openai_client.chat.completions.create(
+    completion = openai_client.chat.completions.create(
         model="gpt-4.1-mini",
         temperature=0.15,
         messages=messages,
-        stream=True,
     )
-    for chunk in stream:
-        delta = chunk.choices[0].delta.content or ""
-        if delta:
-            full_answer += delta
-            stream_placeholder.markdown(full_answer)
-
-    return full_answer.strip()
+    return completion.choices[0].message.content.strip()
 
 
 # =========================
@@ -1102,6 +1083,7 @@ def render_chat_tab():
             "OPENAI_API_KEY ist nicht gesetzt oder der Client konnte nicht initialisiert werden.\n"
             "Bitte den API Key in den Streamlit Secrets oder der .env-Datei hinterlegen."
         )
+        return
 
     # Chat-History initialisieren
     if "chat_messages" not in st.session_state:
@@ -1114,69 +1096,42 @@ def render_chat_tab():
             st.session_state["chat_messages"] = []
             st.rerun()
 
-    # -------- Chatfenster mit Scroll --------
-    messages_html = ""
+    # Bisherige Nachrichten anzeigen (ChatGPT-Style)
     for msg in st.session_state["chat_messages"]:
-        role_label = "You" if msg["role"] == "user" else "EstateAI"
-        align = "flex-end" if msg["role"] == "user" else "flex-start"
-        bg = "#1f2937" if msg["role"] == "user" else "#020617"
-
-        safe_content = html.escape(msg["content"])
-
-        messages_html += f"""
-<div style="display:flex; justify-content:{align}; margin-bottom:0.35rem;">
-  <div style="max-width:80%;">
-    <div style="font-size:0.7rem; opacity:0.7; margin-bottom:0.15rem;">
-      {role_label}
-    </div>
-    <div style="
-        background:{bg};
-        padding:0.5rem 0.75rem;
-        border-radius:0.75rem;
-        white-space:pre-wrap;
-        font-size:0.9rem;
-        line-height:1.3;
-    ">
-      {safe_content}
-    </div>
-  </div>
-</div>
-"""
-
-    st.markdown(
-        f"""
-<div style="
-    height: 420px;
-    overflow-y: auto;
-    border-radius: 0.75rem;
-    border: 1px solid #334155;
-    padding: 0.75rem;
-    background-color: #020617;
-    margin-bottom: 0.5rem;
-">
-    {messages_html}
-</div>
-""",
-        unsafe_allow_html=True,
-    )
+        role = msg.get("role", "assistant")
+        content = msg.get("content", "")
+        with st.chat_message("user" if role == "user" else "assistant"):
+            st.markdown(content)
 
     # -------- Eingabefeld --------
-    prompt = st.chat_input("Ask a question about these listings or an investment scenario…")
+    prompt = st.chat_input("Ask a question about these listings or an investment scenario...")
 
-    if prompt:
-        st.session_state["chat_messages"].append({"role": "user", "content": prompt})
+    if not prompt:
+        return
 
-        # Placeholder für Streaming-Antwort (typing effect)
-        assistant_placeholder = st.empty()
+    # User-Nachricht anzeigen + speichern
+    st.session_state["chat_messages"].append({"role": "user", "content": prompt})
+    with st.chat_message("user"):
+        st.markdown(prompt)
 
+    # Antwort der KI mit „Typing-Effekt“
+    with st.chat_message("assistant"):
         with st.spinner("Analyzing the current portfolio and database context…"):
             context = build_chat_context_for_question(prompt)
-            answer = ask_chat_model(prompt, context, stream_placeholder=assistant_placeholder)
+            answer = ask_chat_model(prompt, context)
 
-        # finale Antwort in History speichern
-        st.session_state["chat_messages"].append({"role": "assistant", "content": answer})
+        # Fake-Streaming: Wort für Wort ausgeben (ohne OpenAI-Streaming)
+        try:
+            def _stream_words(text: str):
+                for token in text.split(" "):
+                    yield token + " "
+            st.write_stream(_stream_words(answer))
+        except Exception:
+            # Falls write_stream nicht verfügbar ist
+            st.markdown(answer)
 
-        st.rerun()
+    # Antwort in History speichern
+    st.session_state["chat_messages"].append({"role": "assistant", "content": answer})
 
 
 # =========================
