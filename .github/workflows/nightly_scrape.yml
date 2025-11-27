@@ -30,8 +30,8 @@ jobs:
       - name: Run nightly scraper (SALE + RENT)
         env:
           ESTATEAI_SCRAPE_LOCATION: "London"
-          ESTATEAI_SALE_PAGES: "3"
-          ESTATEAI_RENT_PAGES: "3"
+          ESTATEAI_SALE_PAGES: "20"
+          ESTATEAI_RENT_PAGES: "20"
         run: |
           python nightly_scrape.py
 
